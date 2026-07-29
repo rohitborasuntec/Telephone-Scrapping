@@ -282,7 +282,7 @@ def safe_find(by, value, timeout=10):
     )
 
 
-@retry(max_attempts=4, delay=1.5, backoff=2, exceptions=RETRYABLE_SELENIUM_EXC)
+# @retry(max_attempts=4, delay=1.5, backoff=2, exceptions=RETRYABLE_SELENIUM_EXC)
 def safe_click(by, value, timeout=10):
     """Waits for an element to be clickable and clicks it, retrying on failure."""
     el = WebDriverWait(driver, timeout).until(
@@ -535,6 +535,7 @@ def extract_pdf(pdf_new_name):
             # return final_pdf_path
 
         except:
+            print("Breakpoint due to errorrrr.....")
             breakpoint()
     else:
         print("Application not found")
@@ -569,7 +570,7 @@ def main():
 
     df = pd.read_excel(file_path)
 
-    for index, row in df[3:].iterrows():
+    for index, row in df[7:].iterrows():
         url = "https://" + row["Url"] if "https://" not in row["Url"] else row["Url"]
 
         count = 1
@@ -661,7 +662,15 @@ def main():
 
                                         app_typ_count[app_type] += 1
                                         pdf_name = f'{index}_{count}.pdf'
-
+                                            #                                     elif driver.find_elements(By.XPATH , '//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"Application Form")]'):
+                                            # safe_click(By.XPATH , '//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"Application Form")]')
+                                            # time.sleep(5)
+                                            # print("PDF SAVED Suceessfully")
+                                            # try:
+                                            #     file_rename(pdf_name)
+                                            # except Exception as e:
+                                            #     print(f"[pdf_rename failed after retries] {e}")
+                                            # count += 1
                                         if driver.find_elements(
                                             By.XPATH,
                                             "//a[@id='tab_documents']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'document')]"
@@ -681,38 +690,40 @@ def main():
                                             By.XPATH,
                                             "//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]"
                                         ):
-                                            safe_click(
+                                            driver.find_element(
                                                 By.XPATH,
                                                 "//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]"
-                                            )
+                                            ).click()
+
                                             time.sleep(randint(3, 6))
                                             safe_click(By.XPATH, '//a[contains(text(),"documents")]')
                                             driver.close()
                                             safe_switch_to_window(-1)
                                             check_for_bot()
-
-                                            select_element = safe_find(By.XPATH, '//select[@name="searchResult_length"]')
-                                            Select(select_element).select_by_value("100")
-
-                                            # safe_click(
-                                            #     By.XPATH,
-                                            #     '//td[@class="dataTableColumnPadding"][contains(text(),"Application form") or contains(text(),"Application Form")] or //td[contains(text(),"Application form") or contains(text(),"Application Form")]'
-                                            # ) # multiple xpaths
                                             try:
-                                                safe_click(By.XPATH , "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]")
+                                                try:
+                                                    select_element = safe_find(By.XPATH, '//select[@name="searchResult_length"]')
+                                                    Select(select_element).select_by_value("100")
+                                                except:
+                                                    print("no dropdown..")
+                                                    try:
+                                                        driver.find_element(By.XPATH , '//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"Application Form")]')
+                                                    except:
+                                                        driver.find_element(By.XPATH , "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]")
+                                                        try:
+                                                            safe_click(By.XPATH,"//a[contains(text(),'Download')]")
+                                                        except:    
+                                                            safe_click(By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
+
+                                                time.sleep(5)
+                                                print("PDF SAVED Suceessfully")
+                                                try:
+                                                    file_rename(pdf_name)
+                                                except Exception as e:
+                                                    print(f"[pdf_rename failed after retries] {e}")
+                                                count += 1
                                             except:
-                                                breakpoint()
-                                            try:
-                                                safe_click(By.XPATH,"//a[contains(text(),'Download')]")
-                                            except:    
-                                                safe_click(By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
-                                            time.sleep(5)
-                                            print("PDF SAVED Suceessfully")
-                                            try:
-                                                file_rename(pdf_name)
-                                            except Exception as e:
-                                                print(f"[pdf_rename failed after retries] {e}")
-                                            count += 1
+                                                print("PDF not found : ",driver.current_url)
                                         else:
                                             print("NOT FOUND FOR ", driver.current_url)
 
@@ -722,7 +733,7 @@ def main():
                                     break
                             else:
                                 print("Something's wrong .... retyinggg...", {j + 1})
-                                time.sleep(3)
+                                time.sleep(randint(3,5))
                         except Exception as e:
                             print("Exception : ", e)
                             if len(driver.window_handles) > 1:
