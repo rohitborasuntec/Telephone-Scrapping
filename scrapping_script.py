@@ -21,8 +21,14 @@ from selenium.webdriver.common.keys import Keys
 
 application_types = [ "Full Planning Application", "Householder", "Full Planning Permission", "Listed Building Consent (S8 P&LBC 1990)", "Fast Track FLH (Householder App)", "Full Planning Permission (Householder)", "Householder Planning Application","Householder Application", "Full Application", "Lawful Development Certificate -Proposed", "Listed Building Consent", "Householders Extensions Prior Approval", "Lawful Development Certificate proposed", "Householder Prior Approval", "General Permitted Development - Extns", "Full planning", "Lawful Development - Proposed Use", "Full", "Outline", "Householder Planning Permission", "Planning Application", "Listed Building", "Planning Permission in Principle", "Prior Approval - Larger Household Extension", "Householder Planning Consent", "Proposed Lawful Development", "Prior Approval Larger Home Extension", "Domestic Application (Householder)", "C of Lawfulness for Proposed Use or Dev", "Residential Extensions", "Pre-Application", "Lawful Development Certificate", "Outline Application", "Full App via planning portal", "Certificate Proposed Development", "Certificate of Lawfulness (Proposed)", "Full Application (8 Weeks)", "Outline Application (8 Weeks)" ]
 
-DOWNLOAD_DIR = Path(r"PDF\test")
+zip_dir = Path(r"Data\zip")
+zip_dir.mkdir(parents=True, exist_ok=True)
+
+DOWNLOAD_DIR = Path(r"Data\temp_dir")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+pdf_dir = Path(r"Data\pdf")
+pdf_dir.mkdir(parents=True, exist_ok=True)
 
 res_col = [
     "Applicant Name", "Full Postal Address", "Planning Reference Number", "Brief Project Description"
@@ -464,6 +470,91 @@ def extract_via_pdf(pdf_path):
 #     else:
 #         print("Application not found")
 #         return None
+# def extract_pdf(pdf_new_name):
+
+#     print("Extrating PDF..")
+
+#     check_for_bot()
+
+#     app_form_xpath = "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]/../td/input[@class='bulkCheck']"
+    
+#     if driver.find_elements(By.XPATH, app_form_xpath):
+
+#         try:
+#             driver.find_element(By.XPATH, app_form_xpath).click()
+
+#             time.sleep(randint(1, 3))
+
+#             safe_click(By.ID, "downloadFiles")
+
+#             print("ZIP DOWN")
+#             # breakpoint()
+#             zip_path = wait_for_download(timeout=60)
+#             print("Zip Path :", zip_path)
+#             print("Zip Path Type :", type(zip_path))
+
+#         # Handle tuple return like:
+#         # ('zip', WindowsPath('PDF/files/26-W-00029.zip'))
+#             # if isinstance(zip_path, tuple):
+#             #     print("Tuple detected, extracting actual path...")
+#             #     print("Tuple contents:", zip_path)
+#             #     zip_path = zip_path[1]
+#         # except:
+#         #     breakpoint()
+#             # zip_path = str(zip_path)
+
+#             # print("Normalized Zip Path :", zip_path)
+
+#             # # Extract ZIP
+#             # extract_dir = os.path.dirname(zip_path)
+#             # print("extract_dir :", extract_dir)
+
+#             # with zipfile.ZipFile(zip_path, "r") as zf:
+#             #     zf.extractall(extract_dir)
+
+#             # print("ZIP extracted successfully")
+
+#             # # Find extracted PDF
+#             # pdf_files = glob.glob(os.path.join(extract_dir, "*.pdf"))
+
+#             # print("PDF files found:", pdf_files)
+
+#             # if not pdf_files:
+#             #     raise FileNotFoundError(f"No PDF found inside ZIP: {zip_path}")
+
+#             # extracted_pdf = max(pdf_files, key=os.path.getmtime)
+
+#             # print("Latest extracted PDF:", extracted_pdf)
+            
+#             # final_pdf_path = os.path.join(extract_dir, pdf_new_name)
+
+#             # # Remove existing file if present
+#             # if os.path.exists(final_pdf_path):
+#             #     os.remove(final_pdf_path)
+
+#             # shutil.move(extracted_pdf, final_pdf_path)
+
+#             # print(f"PDF extracted: {final_pdf_path}")
+
+#             # extract_via_pdf(final_pdf_path)
+
+#             # return final_pdf_path
+
+#         except:
+#             print("Breakpoint due to errorrrr.....")
+#             breakpoint()
+#     else:
+#         print("Application not found")
+#         return None
+
+
+# from pathlib import Path
+# import shutil
+# import zipfile
+# import time
+# from random import randint
+# from selenium.webdriver.common.by import By
+
 def extract_pdf(pdf_new_name):
 
     print("Extrating PDF..")
@@ -471,7 +562,7 @@ def extract_pdf(pdf_new_name):
     check_for_bot()
 
     app_form_xpath = "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]/../td/input[@class='bulkCheck']"
-    
+
     if driver.find_elements(By.XPATH, app_form_xpath):
 
         try:
@@ -482,65 +573,68 @@ def extract_pdf(pdf_new_name):
             safe_click(By.ID, "downloadFiles")
 
             print("ZIP DOWN")
-            # breakpoint()
-            zip_path = wait_for_download(timeout=60)
-            print("Zip Path :", zip_path)
-            print("Zip Path Type :", type(zip_path))
 
-        # Handle tuple return like:
-        # ('zip', WindowsPath('PDF/files/26-W-00029.zip'))
-            # if isinstance(zip_path, tuple):
-            #     print("Tuple detected, extracting actual path...")
-            #     print("Tuple contents:", zip_path)
-            #     zip_path = zip_path[1]
-        # except:
-        #     breakpoint()
-            # zip_path = str(zip_path)
+            # file_ = Path(wait_for_download(timeout=60))
 
-            # print("Normalized Zip Path :", zip_path)
+            # print("Zip Path :", file_)
+            # print("Zip Path Type :", type(file_))
 
-            # # Extract ZIP
-            # extract_dir = os.path.dirname(zip_path)
-            # print("extract_dir :", extract_dir)
+            file_type, file_ = wait_for_download(timeout=60)
+            file_ = Path(file_)
 
-            # with zipfile.ZipFile(zip_path, "r") as zf:
-            #     zf.extractall(extract_dir)
+            print("File Type :", file_type)
+            print("File Path :", file_)
 
-            # print("ZIP extracted successfully")
+            if file_type == "zip":
 
-            # # Find extracted PDF
-            # pdf_files = glob.glob(os.path.join(extract_dir, "*.pdf"))
+                zip_new_name = f"{pdf_new_name}.zip"
 
-            # print("PDF files found:", pdf_files)
+                renamed_zip_path = file_.with_name(zip_new_name)
+                file_.rename(renamed_zip_path)
 
-            # if not pdf_files:
-            #     raise FileNotFoundError(f"No PDF found inside ZIP: {zip_path}")
+                print("Renamed ZIP :", renamed_zip_path)
 
-            # extracted_pdf = max(pdf_files, key=os.path.getmtime)
+                zip_copy_path = zip_dir / zip_new_name
+                shutil.copy2(renamed_zip_path, zip_copy_path)
 
-            # print("Latest extracted PDF:", extracted_pdf)
-            
-            # final_pdf_path = os.path.join(extract_dir, pdf_new_name)
+                print("Copied ZIP to :", zip_copy_path)
 
-            # # Remove existing file if present
-            # if os.path.exists(final_pdf_path):
-            #     os.remove(final_pdf_path)
+                with zipfile.ZipFile(zip_copy_path, "r") as zip_ref:
+                    zip_ref.extractall(pdf_dir)
 
-            # shutil.move(extracted_pdf, final_pdf_path)
+                print("ZIP extracted to :", pdf_dir)
 
-            # print(f"PDF extracted: {final_pdf_path}")
+                renamed_zip_path.unlink(missing_ok=True)
 
-            # extract_via_pdf(final_pdf_path)
+                print("Deleted temp ZIP :", renamed_zip_path)
 
-            # return final_pdf_path
+                return zip_copy_path
 
-        except:
-            print("Breakpoint due to errorrrr.....")
-            breakpoint()
+            else:
+
+                pdf_name = f"{pdf_new_name}.pdf"
+
+                renamed_pdf_path = file_.with_name(pdf_name)
+                file_.rename(renamed_pdf_path)
+
+                pdf_copy_path = pdf_dir / pdf_name
+                shutil.copy2(renamed_pdf_path, pdf_copy_path)
+
+                print("Copied PDF to :", pdf_copy_path)
+
+                renamed_pdf_path.unlink(missing_ok=True)
+
+                print("Deleted temp PDF :", renamed_pdf_path)
+
+                return pdf_copy_path
+
+        except Exception as e:
+            print(f"[extract_pdf] Error: {e}")
+            return None
+
     else:
         print("Application not found")
         return None
-
 
 
 @retry(max_attempts=3, delay=2, backoff=2, exceptions=(FileNotFoundError, ValueError, OSError))
@@ -570,7 +664,7 @@ def main():
 
     df = pd.read_excel(file_path)
 
-    for index, row in df[7:].iterrows():
+    for index, row in df.iterrows():
         url = "https://" + row["Url"] if "https://" not in row["Url"] else row["Url"]
 
         count = 1
@@ -702,7 +796,7 @@ def main():
                                             check_for_bot()
                                             try:
                                                 try:
-                                                    select_element = safe_find(By.XPATH, '//select[@name="searchResult_length"]')
+                                                    select_element = driver.find_element(By.XPATH, '//select[@name="searchResult_length"]')
                                                     Select(select_element).select_by_value("100")
                                                 except:
                                                     print("no dropdown..")
@@ -711,14 +805,14 @@ def main():
                                                     except:
                                                         driver.find_element(By.XPATH , "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]")
                                                         try:
-                                                            safe_click(By.XPATH,"//a[contains(text(),'Download')]")
+                                                            driver.find_element(By.XPATH,"//a[contains(text(),'Download')]")
                                                         except:    
-                                                            safe_click(By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
+                                                            driver.find_element(By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
 
                                                 time.sleep(5)
-                                                print("PDF SAVED Suceessfully")
                                                 try:
                                                     file_rename(pdf_name)
+                                                    print("PDF SAVED Suceessfully")
                                                 except Exception as e:
                                                     print(f"[pdf_rename failed after retries] {e}")
                                                 count += 1
