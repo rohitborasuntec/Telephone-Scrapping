@@ -779,6 +779,22 @@ def file_rename(file_new_name, before_files=None):
     print(f"Renamed {latest_file.name} -> {new_name.name}")
     return new_name
 
+def is_site_working():
+    err_xpaths = [
+        "//*[contains(text(),'This site can’t be reached')]",
+        "//meta[@name='ROBOTS']"
+        "//*[contains(text(),'Access denied')]",
+        "//*[contains(text(),'404 - File or directory not found.')]",
+        "//*[contains(text(),'Page not found')]",
+    ]
+
+    return True
+
+def adv_pro():
+    
+    driver.find_element(By.XPATH,"//button[@id='details-button'][contains(text(),'Advanced')]").click()
+    time.sleep(3)
+    driver.find_element(By.XPATH,"//a[@id='proceed-link']").click()
 
 def main():
 
@@ -833,13 +849,20 @@ def main():
                 check_for_bot()
                 page_source = driver.page_source
 
-                if ("page can't be found" in page_source.lower()
-                        or "site can't be reached" in page_source.lower()
-                        or "page cant be found" in page_source.lower()):
+                # if ("page can't be found" in page_source.lower()
+                #     or "site can't be reached" in page_source.lower()
+                #     or "page cant be found" in page_source.lower()):
+                        
+                if is_site_working():
                     print("Page not found : ", url)
                     save_html_by_id(index)
                     log_failed_item(index, url, None, "listing_page", "page not found")
                     break  # no point retrying a genuinely missing page
+
+                elif driver.find_elements(By.XPATH,"//button[@id='details-button'][contains(text(),'Advanced')]"):
+                    adv_pro()
+
+                time.sleep(randint(1,3))
 
                 safe_select_by_text(By.ID, "week", "29 Jun 2026")
                 print("Date Changed")
