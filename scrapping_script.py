@@ -19,8 +19,8 @@ import undetected_chromedriver as uc
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
-
-
+from commons import user_agent_list
+import traceback
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -167,10 +167,6 @@ RETRYABLE_SELENIUM_EXC = (
 
 file_path = r'c:\Users\Rohit\Documents\Telephone Scrap Project\Url.xlsx'
 
-
-# ---------------------------------------------------------------------------
-# Failure logging
-# ---------------------------------------------------------------------------
 def log_failed_item(row_index, url, case_ref, stage, error):
     is_new = not Path(FAILED_CSV).exists()
     with open(FAILED_CSV, "a", newline="", encoding="utf-8") as f:
@@ -196,11 +192,12 @@ def checkpoint_results():
     except Exception as e:
         logger.error("[checkpoint_results failed] %s", e)
 
-
-# ---------------------------------------------------------------------------
-# Browser setup
-# ---------------------------------------------------------------------------
 def open_chrome():
+    global driver
+    try:
+        driver.quit()
+    except:
+        pass
 
     options = uc.ChromeOptions()
 
@@ -215,6 +212,7 @@ def open_chrome():
     options.add_argument("--disable-backgrounding-occluded-windows")
     options.add_argument("--disable-renderer-backgrounding")
     options.add_argument("--disable-background-timer-throttling")
+    options.add_argument(f"--user-agent={random.choice(user_agent_list)}")
     options.add_experimental_option("prefs", prefs)
 
     @retry(max_attempts=3, delay=5, backoff=2, exceptions=(WebDriverException,))
@@ -227,9 +225,9 @@ def open_chrome():
         return drv
 
     logger.info("Launching Chrome...")
-    drv = _launch()
+    driver = _launch()
 
-    drv.execute_cdp_cmd(
+    driver.execute_cdp_cmd(
         "Page.setDownloadBehavior",
         {
             "behavior": "allow",
@@ -237,11 +235,9 @@ def open_chrome():
         }
     )
 
-    drv.maximize_window()
-    drv.set_page_load_timeout(100)
+    driver.maximize_window()
+    driver.set_page_load_timeout(100)
     logger.info("Chrome launched and configured successfully")
-
-    return drv
 
 
 def save_html_by_id(id, base_dir="script_html_pages"):
@@ -295,7 +291,6 @@ def check_for_bot():
         time.sleep(randint(3, 8))
     else:
         logger.debug("No bot check found")
-
 
 # ---------------------------------------------------------------------------
 # Safe navigation / interaction helpers
@@ -421,14 +416,22 @@ def extract_via_web(case_ref=None):
     address = details.find_element(By.CLASS_NAME, 'address').text
     ref_num = details.find_element(By.CLASS_NAME, 'caseNumber').text
     desc = details.find_element(By.CLASS_NAME, 'description').text
+    agent_name = details.find_element(By.XPATH, "//th[contains(text(),'Agent Name')]/following-sibling::td").text
+    agent_address = details.find_element(By.XPATH, "//th[contains(text(),'Agent Address')]/following-sibling::td").text
 
     item_ext = {
-        "Applicant Name": app_name,
         "Address": address,
+        "Applicant Name": app_name,
+        # "Applicant address": address.replace(ref_number, ""),
+        "Agent Name":agent_name,
+        "Agent Address":agent_address,
+        "Applicant = Agent": agent_name==app_name,
         "Reference": ref_num,
+        "Application Form PDF Available":"No",
         "Proposal": desc,
         "Case Ref (internal)": case_ref,
     }
+    
     logger.info("Data extracted from website for case_ref=%s: ref=%s", case_ref, ref_num)
     logger.debug("Web-extracted data: %s", item_ext)
     return item_ext
@@ -673,8 +676,8 @@ def extract_via_pdf(pdf_path, case_ref=None):
     item_ext = {
         "Address": site_address.replace(ref_number, ""),
         "Applicant Name": applicant_name.replace("First name", "").replace("Surname", "").strip(),
-        "Applicant address": address.replace(ref_number, ""),
-        "Agent name": agent_name,
+        "Applicant Address": address.replace(ref_number, ""),
+        "Agent Name": agent_name,
         "Agent Address": agent_address.replace(ref_number, ""),
         "Applicant = Agent": is_same,
         "Application Form PDF Available": "Yes",
@@ -803,11 +806,11 @@ def main():
 
     df = pd.read_excel(file_path)
 
-    df = df.loc[df['Status'] != 'Completed']
+    # df = df.loc[df['Status'] != 'Completed']
 
     logger.info("Loaded input file %s - %s rows pending", file_path, df.shape[0])
 
-    for index, row in df[:2].iterrows():
+    for index, row in df[2:3].iterrows():
 
         logger.info("=== Row %s starting ===", index)
 
@@ -834,17 +837,29 @@ def main():
                     break
 
                 check_for_bot()
-
-                if is_site_not_working():
-                    logger.warning("Row %s: page not found: %s", index, url)
-                    save_html_by_id(index)
-                    log_failed_item(index, url, None, "listing_page", "page not found")
-                    break
-
-                elif driver.find_elements(By.XPATH, "//button[@id='details-button'][contains(text(),'Advanced')]"):
+                # checking this xpath in case not found possiblity of blocking or need VPN or site not working so used retry with re-opening of browser
+                if driver.find_elements(By.XPATH, "//button[@id='details-button'][contains(text(),'Advanced')]"):
                     adv_pro()
 
+                if not driver.find_elements(By.XPATH,"//h1[contains(.,'Weekly List')]"):
+                    logger.warning("Row %s: page not found: %s", index, url)
+                    for i in range(3):
+                        logger.warning(f"Retrying Attempt : {i+1}")
+                        open_chrome()
+                        driver.get(url)
+                        time.sleep(randint(3,8))
+                        if driver.find_elements(By.XPATH,"//h1[contains(.,'Weekly List')]"):
+                            break
+                    else:
+                        save_html_by_id(index)
+                        df = df.loc[df['Status'] != 'Failed']
+                        log_failed_item(index, url, None, "listing_page", "page not found")
+                        break
+
+                # if is_site_not_working():
+
                 time.sleep(randint(1, 3))
+                #selecting drop down 
 
                 safe_select_by_text(By.ID, "week", date_to_ex)
                 logger.debug(f"Week filter set to {date_to_ex}")
@@ -853,38 +868,27 @@ def main():
                 safe_click(By.XPATH, '//input[@value="Search"]')
                 logger.debug("Search submitted, listing page redirected")
 
-                time.sleep(3)
+                time.sleep(randint(3,5))
 
                 select_element = safe_find(By.ID, 'resultsPerPage')
                 Select(select_element).select_by_value("100")
                 logger.debug("Results-per-page set to 100")
 
                 safe_click(By.XPATH, '//input[@value="Go"]')
-                time.sleep(randint(1, 3))
+                time.sleep(randint(2, 4))
 
                 element_links = driver.find_elements(By.XPATH, '//li[@class="searchresult"]/a[not(@href="#")]')
                 n = len(element_links)
-                i = 0
+                link_index = 0
+                # n = 
                 logger.info("Row %s: total result links found: %s", index, n)
 
-                # --- NEW: one summary dict per website row, appended once,
-                # instead of two separate .at[] calls that used to create
-                # two half-empty rows.
-                new_df_rows.append({
-                    "Row Index": index,
-                    "Case Ref": None,
-                    "index": i,
-                    "total": n,
-                    "Status": "",
-                    "Application Type": "",
-                    "Web Data": "",
-                    "PDF Data": "",
-                })
 
-                while i < n:
+                while link_index < n:
+                    logger.info("Running for %s",link_index)
                     case_ref = None
                     temp_dict = {
-                        "S.No.": count,
+                        "S.No.": link_index,
                         "Websites": websites,
                         "Url": "",
                         "Reference": "",
@@ -893,55 +897,55 @@ def main():
                         "Application Type": "",
                         "Application Form PDF Available": "",
                         "Applicant = Agent": "",
-                        "Agent name": "",
+                        "Agent Name": "",
                         "Agent Address": "",
                         "Applicant Name": "",
-                        "Applicant address": "",
+                        "Applicant Address": "",
                         "Pdf Link": ""
                     }
 
-                    # --- NEW: one dict per case/link. Every field for this
-                    # case gets written into THIS dict, and the dict is
-                    # appended to new_df_rows exactly once, in `finally`,
-                    # no matter which path (continue / break / exception)
-                    # this iteration takes.
-                    link_row = {
-                        "Row Index": index,
-                        "Link Index": i,
-                        "Case Ref": None,
-                        "Url": "",
-                        "Status": "",
-                        "Application Type": "",
-                        "Web Data": "",
-                        "PDF Data": "",
-                    }
-
+                    link_row = {}
                     try:
+                        link_row["Total"] = n
+                        link_row["Row Index"] = index
+                        link_row["Link Index"] = link_index
                         element_links = driver.find_elements(By.XPATH, '//li[@class="searchresult"]/a[not(@href="#")]')
-                        element = element_links[i]
-                        case_ref = element.text.strip() if element.text else f"row{index}_link{i}"
+                        element = element_links[link_index]
+                        case_ref = element.text.strip() if element.text else f"row{index}_link{link_index}"
                         link_row["Case Ref"] = case_ref
                         element.send_keys(Keys.CONTROL + Keys.RETURN)
 
                         safe_switch_to_window(-1)
+                        app_url = driver.current_url
 
-                        if is_site_not_working():
-                            link_row["Status"] = "Not Working Site"
-                            logger.warning("Row %s link %s: page not found (case_ref=%s)", index, i, case_ref)
-                            save_html_by_id(index)
-                            log_failed_item(index, url, case_ref, "detail_page", "page not found")
-                            if len(driver.window_handles) > 1:
-                                driver.close()
-                            safe_switch_to_window(0)
-                            i += 1
-                            continue
+                        if not driver.find_elements(By.XPATH,"//h1[contains(.,'Application Summary')]"):
+                            logger.info("Somethings wrong here ",app_url)
+                            for i in range(3):
+                                logger.warning(f"Retrying Attempt : {i+1}")
+                                open_chrome()
+                                driver.get(app_url)
+                                time.sleep(randint(3,5))
+                                if driver.find_elements(By.XPATH,"//h1[contains(.,'Application Summary')]"):
+                                    break
+                            else:
+                                save_html_by_id(index)
+                                if len(driver.window_handles) > 1:
+                                    driver.close()
+
+                                safe_switch_to_window(0)
+                                link_index += 1
+                                link_row["Status"] = "Not Working Site"
+                                
+                                log_failed_item(index, url, case_ref, "detail_page", "page not found")
+                                continue
 
                         check_for_bot()
 
                         safe_click(By.XPATH,
                                    "//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
                                    "'abcdefghijklmnopqrstuvwxyz'), 'information')]")
-                        time.sleep(3)
+                        
+                        time.sleep(randint(3,5))
 
                         handled = False
 
@@ -961,8 +965,13 @@ def main():
 
                             if app_type not in application_types:
                                 link_row["Status"] = "Not Found"
-                                logger.info("Case_ref=%s: application type not in target list, skipping: %s", case_ref, app_type)
+                                # logger.info("Case_ref=%s: application type not in target list, skipping: %s", case_ref, app_type)
+                                logger.warning("%s not in out app_type list",app_type)
                                 handled = True
+                                link_row["Status"] = "Failed"
+                                link_row["Error"] = "Application Type field not in our list"
+    
+                                # log_failed_item(index, url, case_ref, "application_type","Application Type field not in our list")
                                 break
 
                             logger.info("Case_ref=%s: matching application type found: %s", case_ref, app_type)
@@ -974,21 +983,19 @@ def main():
                             try:
                                 web_data = extract_via_web(case_ref=case_ref)
                                 temp_dict.update(web_data)
-                                link_row["Web Data"] = "Extracted"
+                                link_row["Extracted"] = "Web Data"
+                                link_row["Status"] = "Completed"
+
                             except Exception as e:
-                                link_row["Web Data"] = "Not Extracted"
+                                link_row["Extracted"] = "Not Extracted"
                                 logger.error("Web extraction failed for case_ref=%s: %s", case_ref, e)
                                 log_failed_item(index, url, case_ref, "extract_via_web", e)
 
                             app_typ_count[app_type] += 1
 
                             pdf_name = f'{index}_{count}'
-
-                            if driver.find_elements(
-                                By.XPATH,
-                                "//a[@id='tab_documents']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                                "'abcdefghijklmnopqrstuvwxyz'), 'document')]"
-                            ):
+                            
+                            if driver.find_elements(By.XPATH,"//a[@id='tab_documents']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', ""'abcdefghijklmnopqrstuvwxyz'), 'document')]"):
                                 doc_link = safe_find(By.XPATH, '//a[@id="tab_documents"]').get_attribute("href")
                                 logger.debug("Navigating to documents tab: %s", doc_link)
                                 safe_get(doc_link)
@@ -998,65 +1005,61 @@ def main():
                                     item_ext = download_and_extract(pdf_name, case_ref=case_ref)
                                     temp_dict.update({k: v for k, v in item_ext.items() if v != ''})
                                     link_row["PDF Data"] = "Extracted"
+                                    link_row["Status"] = "Completed"
                                 except Exception as e:
                                     link_row["PDF Data"] = "Not Extracted"
                                     logger.error("[download_and_extract failed after retries] case_ref=%s: %s", case_ref, e)
                                     log_failed_item(index, url, case_ref, "download_and_extract", e)
                                 count += 1
+                                handled = True
 
-                            elif driver.find_elements(
-                                By.XPATH,
-                                "//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                                "'abcdefghijklmnopqrstuvwxyz'), 'documents')]"
-                            ):
-                                driver.find_element(
-                                    By.XPATH,
-                                    "//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                                    "'abcdefghijklmnopqrstuvwxyz'), 'documents')]"
-                                ).click()
+                            elif driver.find_elements(By.XPATH,"//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]"):
+                                driver.find_element(By.XPATH,"//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]").click()
 
                                 time.sleep(randint(3, 6))
                                 safe_click(By.XPATH, '//a[contains(text(),"documents")]')
+
                                 driver.close()
                                 safe_switch_to_window(-1)
                                 check_for_bot()
 
                                 try:
+                                    pdf_link = ""
                                     try:
-                                        select_element = driver.find_element(
-                                            By.XPATH, '//select[@name="searchResult_length"]')
+                                        select_element = driver.find_element(By.XPATH, '//select[@name="searchResult_length"]')
                                         Select(select_element).select_by_value("100")
                                     except NoSuchElementException:
                                         logger.debug("No results-per-page dropdown on external documents page (case_ref=%s)", case_ref)
-                                        time.sleep(5)
+                                    # breakpoint()
                                     try:
-                                        driver.find_element(
-                                            By.XPATH,
-                                            '//a[@data-bind="click: OpenDocument, href: Link"]'
-                                            '//div[contains(text(),"Application Form")]'
-                                        ).click()
+                                        time.sleep(randint(3,8))
+                                        pdf_link = driver.find_element(By.XPATH,'//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"ApplicationForm") or contains(text(),"ApplicationForm")]//ancestor::a').get_attribute('href')
+                                        driver.find_element(By.XPATH,'//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"ApplicationForm") or contains(text(),"ApplicationForm")]').click()
+                                        # time.sleep(5)
                                     except NoSuchElementException:
-                                        driver.find_element(
-                                            By.XPATH,
-                                            "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                                            "'abcdefghijklmnopqrstuvwxyz'), 'application form')]"
-                                        ).click()
-                                    try:
-                                        time.sleep(5)
-                                        driver.find_element(By.XPATH, "//a[contains(text(),'Download')]")
-                                    except NoSuchElementException:
-                                        driver.find_element(
-                                            By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
+                                        try:
+                                            driver.find_element(By.XPATH,"//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]").click()
+                                            try:
+                                                time.sleep(5)
+                                                driver.find_element(By.XPATH, "//a[contains(text(),'Download')]")
+                                            except NoSuchElementException:
+                                                driver.find_element(
+                                                    By.XPATH, '//tr[@class="selected"]//a[@class="viewDocument"]')
+                                        except:
+                                            raise("Error in downloading : %s",str(traceback.format_exc()))
 
                                     before = set(DOWNLOAD_DIR.iterdir())
-                                    driver.find_element(
+                                    try:
+                                        driver.find_element(
                                         By.XPATH,
                                         '//tr[@class="selected"]//a[@class="viewDocument"] | '
                                         '//a[contains(text(),"Download")] | '
                                         '//a[@data-bind="click: OpenDocument, href: Link"]'
                                         '//div[contains(text(),"Application Form")]/..'
                                     ).click()
-                                    pdf_link = ""
+
+                                    except:
+                                        pass
                                     temp_dict["Pdf Link"] = pdf_link
 
                                     file_type, downloaded_path = wait_for_download(before, timeout=60)
@@ -1068,17 +1071,17 @@ def main():
                                     shutil.copy2(downloaded_path, final_pdf_path)
                                     downloaded_path.unlink(missing_ok=True)
                                     logger.info("External-documents PDF saved: %s (case_ref=%s)", final_pdf_path, case_ref)
-
                                     item_ext = extract_via_pdf(final_pdf_path, case_ref=case_ref)
                                     temp_dict.update({k: v for k, v in item_ext.items() if v != ''})
 
                                     count += 1
-                                    link_row["PDF Data"] = "Extracted"
+                                    link_row["Extracted"] = "PDF Data"
 
+                                    handled = True
                                 except Exception as e:
                                     logger.error("External document extraction failed for case_ref=%s: %s", case_ref, e)
                                     log_failed_item(index, url, case_ref, "external_documents", e)
-                                    link_row["PDF Data"] = "Not Extracted"
+                                    link_row["Extracted"] = "Not Extracted"
 
                             else:
                                 logger.warning("No document tab found for %s (case_ref=%s)", driver.current_url, case_ref)
@@ -1087,26 +1090,23 @@ def main():
 
                             if len(driver.window_handles) > 1:
                                 driver.close()
+
                             safe_switch_to_window(0)
-                            handled = True
 
-                            results.append(dict(temp_dict))  # append a COPY, not the live reference
-
+                            results.append(dict(temp_dict))
+                            
                             break
 
                         if not handled:
-                            link_row["Status"] = "Failed - App Type Not Read"
-                            logger.warning("Row %s link %s: could not read Application Type after retries (case_ref=%s)", index, i, case_ref)
-                            log_failed_item(index, url, case_ref, "application_type",
-                                             "Application Type field never appeared")
                             if len(driver.window_handles) > 1:
                                 driver.close()
                             safe_switch_to_window(0)
 
                     except Exception as link_err:
                         link_row["Status"] = "Failed"
-                        logger.error("[link %s failed, skipping] case_ref=%s: %s", i, case_ref, link_err)
-                        log_failed_item(index, url, case_ref, "link_loop", link_err)
+                        link_row["Error"] = link_err
+                        logger.error("[link %s failed, skipping] case_ref=%s: %s", link_index, case_ref, link_err)
+                        log_failed_item(index, url, case_ref, "link_loop", str(traceback.format_exc()))
                         if len(driver.window_handles) > 1:
                             try:
                                 driver.close()
@@ -1118,14 +1118,13 @@ def main():
                             pass
 
                     finally:
-                        # Exactly one row for this case, regardless of which
-                        # branch above ran (continue / break / exception).
                         new_df_rows.append(link_row)
                         save_new_df()
+                        logger.info("Appended the new DF")
 
-                    i += 1
+                    link_index += 1
 
-                    if i % CHECKPOINT_EVERY == 0:
+                    if link_index % CHECKPOINT_EVERY == 0:
                         checkpoint_results()
 
                 df.at[index, 'Status'] = 'Completed'
@@ -1133,7 +1132,7 @@ def main():
                 break
 
             except Exception as e:
-                logger.error("[row %s attempt %s/%s failed] url=%s error=%s", index, row_attempts, row_max_attempts, url, e)
+                logger.error("[row %s attempt %s/%s failed] url=%s error=%s", index, row_attempts, row_max_attempts, url, str(traceback.print_exc()))
                 if row_attempts >= row_max_attempts:
                     save_html_by_id(index)
                     log_failed_item(index, url, None, "row_retry_exhausted", e)
@@ -1141,7 +1140,7 @@ def main():
                     time.sleep(3 * row_attempts)
             df.at[index, 'Status'] = 'Failed'
 
-        checkpoint_results()
+            checkpoint_results()
 
         df.to_excel(file_path, index=False)
         logger.info("=== Row %s complete ===", index)
@@ -1155,11 +1154,11 @@ for val in app_typ_count.values():
     count_ext += val
 
 logger.info("Initial application-type count total: %s", count_ext)
-
+driver = None
 try:
-    driver = open_chrome()
-
+    open_chrome()
     main()
+
 except Exception as e:
     logger.critical("Fatal error in main run: %s", e)
     logger.exception("Full traceback for fatal error:")
