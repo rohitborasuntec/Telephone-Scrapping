@@ -196,6 +196,7 @@ def open_chrome():
     global driver
     try:
         driver.quit()
+        # open_vpn()
     except:
         pass
 
@@ -274,7 +275,7 @@ def random_scroll(min_scroll=200, max_scroll=800, min_pause=0.5, max_pause=2, it
 
 
 def check_for_bot():
-    time.sleep(randint(3, 6))
+    time.sleep(randint(5, 12))
 
     page_source = driver.page_source
 
@@ -410,14 +411,32 @@ def safe_switch_to_window(index=-1):
 
 @retry(max_attempts=3, delay=2, backoff=2, exceptions=RETRYABLE_SELENIUM_EXC)
 def extract_via_web(case_ref=None):
-    time.sleep(3)
+    time.sleep(randint(5,12))
     details = safe_find(By.XPATH, '//div[@class="addressCrumb"]')
-    app_name = details.find_element(By.XPATH, "//th[contains(text(),'Applicant Name')]/following-sibling::td").text
-    address = details.find_element(By.CLASS_NAME, 'address').text
-    ref_num = details.find_element(By.CLASS_NAME, 'caseNumber').text
-    desc = details.find_element(By.CLASS_NAME, 'description').text
-    agent_name = details.find_element(By.XPATH, "//th[contains(text(),'Agent Name')]/following-sibling::td").text
-    agent_address = details.find_element(By.XPATH, "//th[contains(text(),'Agent Address')]/following-sibling::td").text
+    try:
+        app_name = details.find_element(By.XPATH, "//th[contains(text(),'Applicant Name')]/following-sibling::td").text
+    except:
+        app_name = ""
+    try:
+        address = details.find_element(By.CLASS_NAME, 'address').text
+    except:
+        address = ""
+    try:
+        ref_num = details.find_element(By.CLASS_NAME, 'caseNumber').text
+    except:
+        ref_num = ""
+    try:
+        desc = details.find_element(By.CLASS_NAME, 'description').text
+    except:
+        desc = ""
+    try:
+        agent_name = details.find_element(By.XPATH, "//th[contains(text(),'Agent Name')]/following-sibling::td").text
+    except:
+        agent_name = ""
+    try:
+        agent_address = details.find_element(By.XPATH, "//th[contains(text(),'Agent Address')]/following-sibling::td").text
+    except:
+        agent_address = ""
 
     item_ext = {
         "Address": address,
@@ -710,7 +729,7 @@ def download_and_extract(pdf_new_name, case_ref=None):
         pdf_link = ""
 
     driver.find_element(By.XPATH, app_form_xpath).click()
-    time.sleep(randint(1, 3))
+    time.sleep(randint(5, 12))
 
     before = set(DOWNLOAD_DIR.iterdir())
     safe_click(By.ID, "downloadFiles")
@@ -810,7 +829,7 @@ def main():
 
     logger.info("Loaded input file %s - %s rows pending", file_path, df.shape[0])
 
-    for index, row in df[2:3].iterrows():
+    for index, row in df.iterrows():
 
         logger.info("=== Row %s starting ===", index)
 
@@ -847,7 +866,7 @@ def main():
                         logger.warning(f"Retrying Attempt : {i+1}")
                         open_chrome()
                         driver.get(url)
-                        time.sleep(randint(3,8))
+                        time.sleep(randint(5,12))
                         if driver.find_elements(By.XPATH,"//h1[contains(.,'Weekly List')]"):
                             break
                     else:
@@ -858,7 +877,7 @@ def main():
 
                 # if is_site_not_working():
 
-                time.sleep(randint(1, 3))
+                time.sleep(randint(3, 8))
                 #selecting drop down 
 
                 safe_select_by_text(By.ID, "week", date_to_ex)
@@ -868,14 +887,16 @@ def main():
                 safe_click(By.XPATH, '//input[@value="Search"]')
                 logger.debug("Search submitted, listing page redirected")
 
-                time.sleep(randint(3,5))
+                time.sleep(randint(4, 10))
 
                 select_element = safe_find(By.ID, 'resultsPerPage')
                 Select(select_element).select_by_value("100")
                 logger.debug("Results-per-page set to 100")
 
                 safe_click(By.XPATH, '//input[@value="Go"]')
-                time.sleep(randint(2, 4))
+                time.sleep(randint(5, 10))
+
+                save_html_by_id(index,base_dir="script_html_pages/Links_Dir")
 
                 element_links = driver.find_elements(By.XPATH, '//li[@class="searchresult"]/a[not(@href="#")]')
                 n = len(element_links)
@@ -920,11 +941,14 @@ def main():
 
                         if not driver.find_elements(By.XPATH,"//h1[contains(.,'Application Summary')]"):
                             logger.info("Somethings wrong here ",app_url)
+                            breakpoint()
+                            # if driver.find_elements(By.XPATH,"//*[contains(.,'Too Many Requests')]"):
                             for i in range(3):
                                 logger.warning(f"Retrying Attempt : {i+1}")
                                 open_chrome()
+                                
                                 driver.get(app_url)
-                                time.sleep(randint(3,5))
+                                time.sleep(randint(3,8))
                                 if driver.find_elements(By.XPATH,"//h1[contains(.,'Application Summary')]"):
                                     break
                             else:
@@ -945,14 +969,14 @@ def main():
                                    "//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
                                    "'abcdefghijklmnopqrstuvwxyz'), 'information')]")
                         
-                        time.sleep(randint(3,5))
+                        time.sleep(randint(5,12))
 
                         handled = False
 
                         for j in range(1, 5):
                             if not driver.find_elements(By.XPATH, "//th[contains(text(),'Application Type')]"):
                                 logger.debug("Application Type not visible yet, retry %s/4 (case_ref=%s)", j, case_ref)
-                                time.sleep(randint(3, 5))
+                                time.sleep(randint(5, 15))
                                 continue
 
                             app_type = driver.find_element(
@@ -967,13 +991,13 @@ def main():
                                 link_row["Status"] = "Not Found"
                                 # logger.info("Case_ref=%s: application type not in target list, skipping: %s", case_ref, app_type)
                                 logger.warning("%s not in out app_type list",app_type)
-                                handled = True
+                                # handled = True
                                 link_row["Status"] = "Failed"
                                 link_row["Error"] = "Application Type field not in our list"
-    
+                                # breakpoint()
                                 # log_failed_item(index, url, case_ref, "application_type","Application Type field not in our list")
                                 break
-
+                            # breakpoint()
                             logger.info("Case_ref=%s: matching application type found: %s", case_ref, app_type)
                             temp_dict["Url"] = driver.current_url
                             temp_dict["Application Type"] = app_type
@@ -1016,7 +1040,7 @@ def main():
                             elif driver.find_elements(By.XPATH,"//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]"):
                                 driver.find_element(By.XPATH,"//a[@id='tab_externalDocuments']/span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'documents')]").click()
 
-                                time.sleep(randint(3, 6))
+                                time.sleep(randint(5, 12))
                                 safe_click(By.XPATH, '//a[contains(text(),"documents")]')
 
                                 driver.close()
@@ -1032,7 +1056,7 @@ def main():
                                         logger.debug("No results-per-page dropdown on external documents page (case_ref=%s)", case_ref)
                                     # breakpoint()
                                     try:
-                                        time.sleep(randint(3,8))
+                                        time.sleep(randint(5,12))
                                         pdf_link = driver.find_element(By.XPATH,'//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"ApplicationForm") or contains(text(),"ApplicationForm")]//ancestor::a').get_attribute('href')
                                         driver.find_element(By.XPATH,'//a[@data-bind="click: OpenDocument, href: Link"]//div[contains(text(),"ApplicationForm") or contains(text(),"ApplicationForm")]').click()
                                         # time.sleep(5)
@@ -1040,7 +1064,7 @@ def main():
                                         try:
                                             driver.find_element(By.XPATH,"//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application form')]").click()
                                             try:
-                                                time.sleep(5)
+                                                time.sleep(randint(5,12))
                                                 driver.find_element(By.XPATH, "//a[contains(text(),'Download')]")
                                             except NoSuchElementException:
                                                 driver.find_element(
@@ -1155,6 +1179,7 @@ for val in app_typ_count.values():
 
 logger.info("Initial application-type count total: %s", count_ext)
 driver = None
+win = None
 try:
     open_chrome()
     main()
@@ -1181,3 +1206,6 @@ finally:
         except Exception as e:
             logger.error("Error while closing driver: %s", e)
     logger.info("Scraper run finished. Log file: %s", LOG_FILE)
+
+    if win:
+        win[0].close()
