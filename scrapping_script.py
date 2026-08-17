@@ -828,12 +828,13 @@ def main():
 
     df = pd.read_excel(file_path)
 
-    # df = df.loc[df['Status'] != 'Completed']
+    # df = df.loc[df['Status'] == 'Failed']
 
     logger.info("Loaded input file %s - %s rows pending", file_path, df.shape[0])
 
     for index, row in df.iterrows():
-
+        if row['Status']!="Failed":
+            continue
         logger.info("=== Row %s starting ===", index)
 
         url = "https://" + row["Url"] if "https://" not in row["Url"] else row["Url"]
@@ -1193,7 +1194,7 @@ finally:
     res_df = pd.DataFrame(results)
     # for i in range(1, 1000):
     try:
-        out_path = f"Output/res_df_{datetime.today().strftime('%Y%m%d')}.csv"
+        out_path = f"Output/res_df_{datetime.today().strftime('%Y%m%d')}_new.csv"
         res_df.to_csv(out_path, index=False)
         save_new_df()
         logger.info("Results saved: %s (%s rows)", out_path, len(res_df))
