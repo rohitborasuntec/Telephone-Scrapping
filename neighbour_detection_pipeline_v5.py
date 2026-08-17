@@ -1,21 +1,63 @@
+"""
+Neighbour Detection Pipeline (v5)
+==================================
+Combines OS Places API (address/UPRN lookup) with OS NGD API (building AND
+land parcel polygons) to identify TRUE boundary-touching neighbours for a
+target property, then applies the client's business rules.
+
+Layered defences against false-positive "neighbours":
+  1. Buffered .intersects() as a coarse first pass (buildings + land parcels).
+  2. shares_real_boundary(): the intersection must be an actual LINE of
+     meaningful length, not just a single touching corner POINT.
+  3. is_clean_two_party_boundary(): rejects a shared boundary if a THIRD
+     property's parcel sits right at the MIDPOINT of that boundary — a
+     signature of a multi-way "pinch point" where 3+ plots meet at a
+     corner. Confirmed threshold: genuine neighbours had nearest-third-
+     party distances of ~3.9-9m+; pinch-point false positives were ~1.5m.
+     PINCH_POINT_CHECK_DISTANCE_M is set at 2.0m to sit in that gap.
+  4. sanity_check_distance(): final straight-line distance check between
+     the target's and candidate's actual address points. Catches cases
+     the polygon logic can't — e.g. cul-de-sac ("Close") developments
+     where two unrelated properties both border the same large shared/
+     communal land parcel (a turning circle, verge, amenity strip), which
+     makes them register as "touching" even though they are nowhere near
+     each other in reality.
+
+STATUS / STILL TUNING:
+  MIN_THIRD_PARTY_AREA_SQM and MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M are
+  starting values based on the test addresses worked through so far, not
+  exhaustively validated. Recommended before going live: build a table of
+  15-20 known addresses (using client-style aerial screenshots to confirm
+  expected neighbours) and run find_neighbours() on all of them after any
+  threshold change, checking nothing that used to pass now fails and vice
+  versa. Tune one constant at a time.
+
+Requirements:
+    pip install requests shapely
+
+You will need an OS Data Hub API key on the Premium Plan (free tier /
+development mode is fine for testing) with these APIs added to the project:
+    - OS Places API
+    - OS NGD API - Features
+"""
 
 import requests
 from shapely.geometry import shape, Point
-from shapely.ops import unary_union
-import json 
+
+OS_API_KEY = "aJARAMAGjcqsJbfGyA9pXOAuYkwhyxHm"
 
 PLACES_BASE = "https://api.os.uk/search/places/v1"
 NGD_BASE = "https://api.os.uk/features/ngd/ofa/v1/collections"
 
-BUFFER_M = 1.0                     # slack distance for polygon-polygon adjacency test
-SEARCH_PAD_M = 45.0                # bbox padding around the target property, in metres
-ADDRESS_POINT_SLACK_M = 2.0        # buffer applied to a polygon before checking address points
-ADDRESS_MATCH_FALLBACK_M = 6.0     # nearest-address-point fallback distance
-LAND_CONTAINMENT_FALLBACK_M = 5.0  # nearest-land-parcel fallback distance (target's own parcel)
-MIN_SHARED_BOUNDARY_LENGTH_M = 0.3 # minimum length to count as a real shared edge (not a corner)
-PINCH_POINT_CHECK_DISTANCE_M = 2.0 # how close a third parcel's midpoint-distance must be to veto
-MIN_THIRD_PARTY_AREA_SQM = 30.0    # PLACEHOLDER — tune against real data, see notes above
-MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M = 30.0  # sanity cap: candidate address point vs target
+BUFFER_M = 1.0                        # slack distance for polygon-polygon adjacency test
+SEARCH_PAD_M = 30.0                   # bbox padding around the target property, in metres
+ADDRESS_POINT_SLACK_M = 2.0           # buffer applied to a polygon before checking address points
+ADDRESS_MATCH_FALLBACK_M = 6.0        # nearest-address-point fallback distance
+LAND_CONTAINMENT_FALLBACK_M = 5.0     # nearest-land-parcel fallback distance (target's own parcel)
+MIN_SHARED_BOUNDARY_LENGTH_M = 0.3    # minimum length to count as a real shared edge (not a corner)
+PINCH_POINT_CHECK_DISTANCE_M = 2.0    # confirmed against real data — see notes above
+MIN_THIRD_PARTY_AREA_SQM = 30.0       # ignore tiny driveway/path slivers in the pinch-point check
+MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M = 30.0  # final address-point sanity check — tune against test set
 MAX_NEIGHBOURS_BEFORE_ABORT = 4
 
 CRS_TEMPLATE = "http://www.opengis.net/def/crs/EPSG/0/{}"
@@ -29,72 +71,67 @@ EXCLUDED_RESIDENTIAL_SUBTYPES = {
     "RD08",  # Flat (Maisonette) -- confirm exact codes with OS scheme doc
 }
 
-
-# ---------------------------------------------------------------------------
-# Per-property context — replaces the old module-level `srs` global.
-# Created fresh at the start of find_neighbours() and threaded through
-# every helper explicitly, so nothing can leak stale state between
-# properties in a batch run.
-# ---------------------------------------------------------------------------
-class OSContext:
-    def __init__(self, api_key, srs="EPSG:27700"):
-        self.api_key = api_key
-        self.srs = srs
-
-    def crs(self):
-        return CRS_TEMPLATE.format(self.srs.split(":")[-1])
+srs = "EPSG:27700"  # set dynamically from the geocode response
 
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Geocode the target address
 # ---------------------------------------------------------------------------
-def geocode_address(ctx, address_text):
+def geocode_address(address_text):
+    global srs
     url = f"{PLACES_BASE}/find"
-    params = {"query": address_text, "maxresults": 1, "key": ctx.api_key}
+    params = {"query": address_text, "maxresults": 1, "key": OS_API_KEY}
     r = requests.get(url, params=params)
     r.raise_for_status()
     data = r.json()
-    ctx.srs = data.get("header", {}).get("output_srs", ctx.srs)
+    srs = data.get("header", {}).get("output_srs", srs)
     results = data.get("results", [])
-    print("Current Address Results : ", results)
+    
+
     if not results:
         return None
     return results[0]["DPA"]
 
 
+def _crs():
+    return CRS_TEMPLATE.format(srs.split(":")[-1])
+
+
 # ---------------------------------------------------------------------------
 # STEP 2 — Fetch polygons by TOID / by bbox, for a given NGD collection
 # ---------------------------------------------------------------------------
-def get_polygon_by_toid(ctx, collection, toid):
+def get_polygon_by_toid(collection, toid):
     url = f"{NGD_BASE}/{collection}/items"
     params = {
-        "key": ctx.api_key,
+        "key": OS_API_KEY,
         "filter": f"toid='{toid}'",
         "filter-lang": "cql-text",
-        "crs": ctx.crs(),
+        "crs": _crs(),
     }
     r = requests.get(url, params=params)
     if r.status_code != 200:
         print(f"[{collection}] by-TOID error body:", r.text)
     r.raise_for_status()
     features = r.json().get("features", [])
+    
     return shape(features[0]["geometry"]) if features else None
 
 
-def get_nearby_polygons(ctx, collection, x, y, pad=SEARCH_PAD_M):
+def get_nearby_polygons(collection, x, y, pad=SEARCH_PAD_M):
     bbox = f"{x - pad},{y - pad},{x + pad},{y + pad}"
     url = f"{NGD_BASE}/{collection}/items"
     params = {
-        "key": ctx.api_key,
+        "key": OS_API_KEY,
         "bbox": bbox,
-        "bbox-crs": ctx.crs(),
-        "crs": ctx.crs(),
-        "limit": 100,
+        "bbox-crs": _crs(),
+        "crs": _crs(),
+        "limit": 10,
     }
     r = requests.get(url, params=params)
     if r.status_code != 200:
         print(f"[{collection}] bbox error body:", r.text)
     r.raise_for_status()
+    
     return r.json().get("features", [])
 
 
@@ -111,7 +148,7 @@ def find_containing_polygon(x, y, features, fallback_max_m=LAND_CONTAINMENT_FALL
         d = poly.distance(pt)
         if best_dist is None or d < best_dist:
             best_toid, best_poly, best_dist = feat["properties"]["toid"], poly, d
-
+    
     if best_dist is not None and best_dist < fallback_max_m:
         print(f"Warning: no exact containing parcel found, using nearest ({best_dist:.2f}m away)")
         return best_toid, best_poly
@@ -119,13 +156,87 @@ def find_containing_polygon(x, y, features, fallback_max_m=LAND_CONTAINMENT_FALL
 
 
 # ---------------------------------------------------------------------------
-# STEP 3 — Address matching (needed BEFORE adjacency, to merge fragments)
+# STEP 3 — Real geometric adjacency test
 # ---------------------------------------------------------------------------
-def get_nearby_address_points(ctx, x, y, radius=SEARCH_PAD_M):
+def shares_real_boundary(poly_a, poly_b, min_shared_length=MIN_SHARED_BOUNDARY_LENGTH_M):
+    """True only if the two polygons share an actual boundary LINE (not
+    just a single touching corner point), of at least min_shared_length.
+    Returns the shared geometry itself (for further checks) or None."""
+    intersection = poly_a.boundary.intersection(poly_b.boundary)
+
+    if intersection.is_empty:
+        return None
+    if intersection.geom_type in ("Point", "MultiPoint"):
+        return None
+
+    if hasattr(intersection, "geoms"):
+        total_len = sum(g.length for g in intersection.geoms if hasattr(g, "length"))
+    else:
+        total_len = intersection.length
+
+    if total_len < min_shared_length:
+        return None
+    
+    return intersection
+
+
+def is_clean_two_party_boundary(shared_segment, target_toid, candidate_toid,
+                                  all_land_features,
+                                  min_distance_from_third=PINCH_POINT_CHECK_DISTANCE_M,
+                                  min_third_party_area=MIN_THIRD_PARTY_AREA_SQM):
+    """Reject a shared boundary if a THIRD property's parcel sits right at
+    its MIDPOINT — a signature of a multi-way pinch point (3+ plots meeting
+    at a corner) rather than a genuine two-property boundary. Small parcels
+    (driveway/path slivers) are ignored so they don't wrongly veto a real
+    neighbour relationship."""
+    midpoint = shared_segment.interpolate(0.5, normalized=True)
+    for feat in all_land_features:
+        toid = feat["properties"]["toid"]
+        if toid in (target_toid, candidate_toid):
+            continue
+        poly = shape(feat["geometry"])
+        if poly.area < min_third_party_area:
+            continue
+        if midpoint.distance(poly) < min_distance_from_third:
+            return False
+    
+    return True
+
+
+def find_touching_polygons(target_toid, target_polygon, nearby_features, all_land_features=None):
+    buffered_target = target_polygon.buffer(BUFFER_M)
+    touching = []
+    for feat in nearby_features:
+        toid = feat["properties"]["toid"]
+        if toid == target_toid:
+            continue
+        poly = shape(feat["geometry"])
+
+        if not buffered_target.intersects(poly):
+            continue
+
+        shared = shares_real_boundary(target_polygon, poly)
+        if shared is None:
+            continue
+
+        if all_land_features is not None:
+            if not is_clean_two_party_boundary(shared, target_toid, toid, all_land_features):
+                continue
+
+        touching.append({"toid": toid, "polygon": poly})
+    
+    return touching
+
+
+# ---------------------------------------------------------------------------
+# STEP 4 — Nearby address points (for matching polygons back to addresses)
+# ---------------------------------------------------------------------------
+def get_nearby_address_points(x, y, radius=SEARCH_PAD_M):
     url = f"{PLACES_BASE}/radius"
-    params = {"point": f"{x},{y}", "radius": radius, "key": ctx.api_key}
+    params = {"point": f"{x},{y}", "radius": radius, "key": OS_API_KEY}
     r = requests.get(url, params=params)
     r.raise_for_status()
+    
     return [res["DPA"] for res in r.json().get("results", []) if "DPA" in res]
 
 
@@ -134,8 +245,7 @@ def match_address_to_polygon(polygon, address_points,
                               fallback_max_m=ADDRESS_MATCH_FALLBACK_M):
     """Find address point(s) belonging to this polygon. Tries a buffered
     .covers() test first, then falls back to the single nearest address
-    point if it's genuinely close (handles edge-of-polygon placements).
-    Returns a list of DPA dicts (possibly empty)."""
+    point if it's genuinely close (handles edge-of-polygon placements)."""
     poly_buffered = polygon.buffer(buffer_m)
     matched = [dpa for dpa in address_points
                if poly_buffered.covers(Point(dpa["X_COORDINATE"], dpa["Y_COORDINATE"]))]
@@ -151,350 +261,165 @@ def match_address_to_polygon(polygon, address_points,
 
     if best_dist is not None and best_dist < fallback_max_m:
         return [best_dpa]
+    
     return []
 
 
-# ---------------------------------------------------------------------------
-# STEP 4 — Merge same-owner land fragments into one curtilage polygon.
-#
-# This is the key fix: OS NGD often represents one property's garden as
-# several adjoining polygons (rear strip, side strip, access sliver, etc.)
-# instead of a single parcel. Testing adjacency fragment-vs-fragment can
-# find a "real shared boundary" between two slivers that both sit several
-# strips away from the actual dwellings they belong to — including across
-# streets. Merging by matched UPRN first means every adjacency test after
-# this point compares whole-curtilage-to-whole-curtilage.
-# ---------------------------------------------------------------------------
-def build_curtilage_map(nearby_land, address_points):
-    """Returns:
-        curtilages: dict uprn -> {"polygon": merged Polygon/MultiPolygon,
-                                   "address": address string,
-                                   "component_toids": [toid, ...]}
-        unassigned: list of land features with no address match at all
-                    (slivers/paths/etc.) — kept separately since they're
-                    still needed for the pinch-point third-party check.
-    """
-    groups = {}      # uprn -> {"address":..., "polys":[...], "toids":[...]}
-    unassigned = []
-
-    for feat in nearby_land:
-        toid = feat["properties"]["toid"]
-        poly = shape(feat["geometry"])
-        matched = match_address_to_polygon(poly, address_points)
-
-        if not matched:
-            unassigned.append(feat)
-            continue
-
-        # A fragment usually matches one address; if it matches more than
-        # one (rare, e.g. a shared driveway), assign it to the first —
-        # log this at the call site if you need to audit shared parcels.
-        dpa = matched[0]
-        uprn = dpa["UPRN"]
-        if uprn not in groups:
-            groups[uprn] = {"address": dpa["ADDRESS"], "dpa": dpa, "polys": [], "toids": []}
-        groups[uprn]["polys"].append(poly)
-        groups[uprn]["toids"].append(toid)
-
-    curtilages = {}
-    for uprn, g in groups.items():
-        merged = unary_union(g["polys"]) if len(g["polys"]) > 1 else g["polys"][0]
-        curtilages[uprn] = {
-            "polygon": merged,
-            "address": g["address"],
-            "dpa": g["dpa"],
-            "component_toids": g["toids"],
-        }
-
-    return curtilages, unassigned
+def sanity_check_distance(target_x, target_y, candidate_dpa,
+                           max_dist=MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M):
+    """Final straight-line check between the target's and candidate's actual
+    address points. Catches cases the polygon logic can't reliably detect —
+    e.g. two properties both bordering a large shared/communal parcel
+    (a cul-de-sac turning circle, a verge) that makes them register as
+    'touching' even though they are nowhere near each other in reality."""
+    cand_pt = Point(candidate_dpa["X_COORDINATE"], candidate_dpa["Y_COORDINATE"])
+    target_pt = Point(target_x, target_y)
+    d = target_pt.distance(cand_pt)
+    
+    return d <= max_dist, d
 
 
 # ---------------------------------------------------------------------------
-# STEP 5 — Real geometric adjacency test
-# ---------------------------------------------------------------------------
-def shares_real_boundary(poly_a, poly_b, min_shared_length=MIN_SHARED_BOUNDARY_LENGTH_M):
-    """True only if the two polygons share an actual boundary LINE (not
-    just a single touching corner point), of at least min_shared_length."""
-    intersection = poly_a.boundary.intersection(poly_b.boundary)
-
-    if intersection.is_empty:
-        return None  # no shared boundary at all
-
-    if intersection.geom_type in ("Point", "MultiPoint"):
-        return None  # corner-only contact
-
-    if hasattr(intersection, "geoms"):
-        total_len = sum(g.length for g in intersection.geoms if hasattr(g, "length"))
-    else:
-        total_len = intersection.length
-
-    if total_len < min_shared_length:
-        return None
-
-    return intersection  # return the actual shared geometry for further checks
-
-
-def is_clean_two_party_boundary(shared_segment, target_toids, candidate_toids,
-                                  all_land_features,
-                                  min_distance_from_third=PINCH_POINT_CHECK_DISTANCE_M,
-                                  min_third_party_area=MIN_THIRD_PARTY_AREA_SQM):
-    """Reject a shared boundary if a THIRD property's parcel sits right at
-    its MIDPOINT — a signature of a multi-way pinch point (3+ plots meeting
-    at a corner) rather than a genuine two-property boundary. Small parcels
-    (driveway/path slivers) are ignored so they don't wrongly veto a real
-    neighbour relationship.
-
-    IMPORTANT: target_toids and candidate_toids must be the FULL list of
-    component TOIDs making up each side's merged curtilage (not a UPRN —
-    land features only carry a toid). The boundary midpoint sits at
-    distance 0 from the target's and candidate's own polygons by
-    definition (it's their shared edge), so their own fragments MUST be
-    excluded here or every boundary self-vetoes. This was a real
-    regression in the v5 merge-by-UPRN rewrite: the old TOID-based skip
-    was left comparing TOIDs to UPRNs, which is never true, so it silently
-    stopped excluding anything.
-
-    NOTE: this checks against the raw (unmerged) land features on purpose —
-    the pinch-point signal is about a third party's footprint sitting in
-    the way, which is independent of how that third party's own fragments
-    got merged."""
-    own_toids = set(target_toids) | set(candidate_toids)
-    midpoint = shared_segment.interpolate(0.5, normalized=True)
-    for feat in all_land_features:
-        toid = feat["properties"]["toid"]
-        if toid in own_toids:
-            continue
-        poly = shape(feat["geometry"])
-        if poly.area < min_third_party_area:
-            continue  # too small to be a real neighbouring property
-        if midpoint.distance(poly) < min_distance_from_third:
-            return False, toid
-    return True, None
-
-
-# ---------------------------------------------------------------------------
-# STEP 6 — Client's filtering rules
+# STEP 5 — Client's filtering rules
 # ---------------------------------------------------------------------------
 def is_valid_neighbour(dpa_record):
     code = dpa_record.get("CLASSIFICATION_CODE", "")
     state = dpa_record.get("BLPU_STATE_CODE_DESCRIPTION", "")
-
+    
     if not code.startswith("R"):
         return False, "not residential"
     if code in EXCLUDED_RESIDENTIAL_SUBTYPES:
         return False, "flat/maisonette excluded"
     if state and state.lower() != "in use":
         return False, "not an active/in-use property"
+
     return True, "ok"
-
-
-def sanity_check_distance(target_x, target_y, candidate_dpa, max_dist=MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M):
-    """Coarse outlier guard: a genuine boundary-sharing neighbour's address
-    point should never be far from the target. Catches cases where a chain
-    of merged/adjoining fragments produces a geometrically 'clean' boundary
-    between two properties that are, in plain terms, nowhere near each
-    other (e.g. backing onto a shared rear lane from different streets)."""
-    cand_pt = Point(candidate_dpa["X_COORDINATE"], candidate_dpa["Y_COORDINATE"])
-    target_pt = Point(target_x, target_y)
-    d = target_pt.distance(cand_pt)
-    return d <= max_dist, d
 
 
 # ---------------------------------------------------------------------------
 # MAIN PIPELINE
 # ---------------------------------------------------------------------------
-def find_neighbours(address_text, api_key, debug=False):
-    ctx = OSContext(api_key)
-
-    target = geocode_address(ctx, address_text)
+def find_neighbours(address_text, debug=False):
+    target = geocode_address(address_text)
     if not target:
         return {"error": "target address not found"}
 
     target_x, target_y = target["X_COORDINATE"], target["Y_COORDINATE"]
-    target_uprn = target["UPRN"]
     target_building_toid = target.get("TOPOGRAPHY_LAYER_TOID")
 
-    rejected = []
-    vetoed = []
-
-    # ---- Layer 1: buildings (no pinch-point veto needed here — a shared
-    # WALL between exactly two buildings is essentially always genuine) ----
+    # ---- Layer 1: buildings ----
     target_building_poly = None
     if target_building_toid:
-        target_building_poly = get_polygon_by_toid(ctx, "bld-fts-buildingpart-1", target_building_toid)
+        target_building_poly = get_polygon_by_toid("bld-fts-buildingpart-1", target_building_toid)
 
-    nearby_buildings = get_nearby_polygons(ctx, "bld-fts-buildingpart-1", target_x, target_y)
+    nearby_buildings = get_nearby_polygons("bld-fts-buildingpart-1", target_x, target_y)
 
     touching_building = []
     if target_building_poly is not None:
-        buffered = target_building_poly.buffer(BUFFER_M)
-        for feat in nearby_buildings:
-            toid = feat["properties"]["toid"]
-            if toid == target_building_toid:
-                continue
-            poly = shape(feat["geometry"])
-            if not buffered.intersects(poly):
-                continue
-            shared = shares_real_boundary(target_building_poly, poly)
-            if shared is None:
-                continue
-            touching_building.append({"toid": toid, "polygon": poly, "source": "building"})
+        touching_building = find_touching_polygons(
+            target_building_toid, target_building_poly, nearby_buildings
+        )
 
-    # ---- Layer 2: land parcels, MERGED BY ADDRESS before adjacency ----
-    nearby_land = get_nearby_polygons(ctx, "lnd-fts-land-1", target_x, target_y)
-    address_points = get_nearby_address_points(ctx, target_x, target_y)
-
-    curtilages, unassigned_land = build_curtilage_map(nearby_land, address_points)
-
-    # Establish the target's own merged curtilage. Prefer the address-match
-    # result (uprn lookup); fall back to raw point-containment if for some
-    # reason the target's own address didn't match any land fragment.
-    target_curtilage = curtilages.get(target_uprn, {}).get("polygon")
-    if target_curtilage is None:
-        fallback_toid, target_curtilage = find_containing_polygon(target_x, target_y, nearby_land)
-        if target_curtilage is not None:
-            # Register a synthetic single-fragment "curtilage" entry so the
-            # pinch-point exclusion below still knows which TOID is the
-            # target's own, and doesn't self-veto in this fallback path too.
-            curtilages[target_uprn] = {
-                "polygon": target_curtilage, "address": target["ADDRESS"],
-                "dpa": target, "component_toids": [fallback_toid],
-            }
-            if debug:
-                print("Note: target had no address-matched land fragment; used raw containment fallback.")
+    # ---- Layer 2: land parcels (pinch-point veto applied) ----
+    nearby_land = get_nearby_polygons("lnd-fts-land-1", target_x, target_y)
+    target_land_toid, target_land_poly = find_containing_polygon(target_x, target_y, nearby_land)
 
     touching_land = []
-    if target_curtilage is not None:
-        buffered_target = target_curtilage.buffer(BUFFER_M)
-        for uprn, c in curtilages.items():
-            if uprn == target_uprn:
-                continue
-            poly = c["polygon"]
-            if not buffered_target.intersects(poly):
-                continue
-
-            shared = shares_real_boundary(target_curtilage, poly)
-            if shared is None:
-                continue
-
-            target_toids = curtilages.get(target_uprn, {}).get("component_toids", [])
-            clean, blocker_toid = is_clean_two_party_boundary(
-                shared, target_toids, c["component_toids"], nearby_land
-            )
-            if not clean:
-                vetoed.append({
-                    "uprn": uprn, "address": c["address"],
-                    "reason": f"pinch-point veto — third-party parcel {blocker_toid} sits at boundary midpoint",
-                })
-                continue
-
-            ok, dist = sanity_check_distance(target_x, target_y, c["dpa"])
-            if not ok:
-                vetoed.append({
-                    "uprn": uprn, "address": c["address"],
-                    "reason": f"address point {dist:.1f}m from target — exceeds plausible neighbour distance "
-                              f"({MAX_PLAUSIBLE_NEIGHBOUR_DISTANCE_M}m); likely a cross-street or merged-fragment artefact",
-                })
-                continue
-
-            touching_land.append({
-                "uprn": uprn, "dpa": c["dpa"], "polygon": poly,
-                "component_toids": c["component_toids"], "source": "land",
-            })
+    if target_land_poly is not None:
+        touching_land = find_touching_polygons(
+            target_land_toid, target_land_poly, nearby_land,
+            all_land_features=nearby_land
+        )
 
     if debug:
         print("target_building_toid:", target_building_toid)
         print("target_building_poly is None?", target_building_poly is None)
         print("nearby_buildings count:", len(nearby_buildings))
         print("nearby_land count:", len(nearby_land))
-        print("curtilages resolved:", len(curtilages), "| unassigned fragments:", len(unassigned_land))
+        print("target_land_toid:", target_land_toid)
         print("touching_building count:", len(touching_building))
         print("touching_land count:", len(touching_land))
-        print("vetoed count:", len(vetoed))
+
+    all_touching = touching_building + touching_land
+
+    address_points = get_nearby_address_points(target_x, target_y)
 
     neighbours = []
+    rejected = []
     seen_uprns = set()
 
-    # -- from the building layer, still need address matching --
-    for t in touching_building:
+    for t in all_touching:
         matched = match_address_to_polygon(t["polygon"], address_points)
+
         if not matched:
-            rejected.append({"toid": t["toid"], "source": "building",
-                              "reason": "no address point found inside polygon"})
+            rejected.append({"toid": t["toid"], "reason": "no address point found inside polygon"})
             continue
+
         for dpa in matched:
             uprn = dpa["UPRN"]
-            if uprn == target_uprn or uprn in seen_uprns:
+            if uprn == target.get("UPRN") or uprn in seen_uprns:
                 continue
-            seen_uprns.add(uprn)
 
+            # Final sanity check — catches shared-communal-parcel false positives
             ok, dist = sanity_check_distance(target_x, target_y, dpa)
             if not ok:
-                vetoed.append({"uprn": uprn, "address": dpa.get("ADDRESS"),
-                                "reason": f"address point {dist:.1f}m from target — exceeds plausible distance"})
+                seen_uprns.add(uprn)
+                rejected.append({
+                    "toid": t["toid"], "uprn": uprn, "address": dpa.get("ADDRESS"),
+                    "reason": f"address point {dist:.1f}m away — exceeds plausible neighbour distance"
+                })
                 continue
+
+            seen_uprns.add(uprn)
 
             valid, reason = is_valid_neighbour(dpa)
             if valid:
                 neighbours.append({
-                    "uprn": uprn, "address": dpa["ADDRESS"],
+                    "uprn": uprn,
+                    "address": dpa["ADDRESS"],
                     "classification": dpa.get("CLASSIFICATION_CODE_DESCRIPTION"),
-                    "toid": t["toid"], "source": "building",
+                    "toid": t["toid"],
+                    "distance_m": round(dist, 1),
                 })
             else:
-                rejected.append({"toid": t["toid"], "uprn": uprn,
-                                  "address": dpa.get("ADDRESS"), "reason": reason})
-
-    # -- from the merged land curtilages, address already resolved --
-    for t in touching_land:
-        uprn = t["uprn"]
-        if uprn == target_uprn or uprn in seen_uprns:
-            continue
-        seen_uprns.add(uprn)
-        dpa = t["dpa"]
-
-        valid, reason = is_valid_neighbour(dpa)
-        if valid:
-            neighbours.append({
-                "uprn": uprn, "address": dpa["ADDRESS"],
-                "classification": dpa.get("CLASSIFICATION_CODE_DESCRIPTION"),
-                "toid": t["component_toids"][0], "component_toids": t["component_toids"],
-                "source": "land",
-            })
-        else:
-            rejected.append({"uprn": uprn, "address": dpa.get("ADDRESS"),
-                              "toid": t["component_toids"][0], "reason": reason})
+                rejected.append({
+                    "toid": t["toid"], "uprn": uprn,
+                    "address": dpa.get("ADDRESS"), "reason": reason,
+                })
 
     target_is_flat = target.get("CLASSIFICATION_CODE") in EXCLUDED_RESIDENTIAL_SUBTYPES
     aborted = target_is_flat and len(neighbours) > MAX_NEIGHBOURS_BEFORE_ABORT
-
+    
     return {
         "target": {
-            "uprn": target_uprn,
+            "uprn": target["UPRN"],
             "address": target["ADDRESS"],
             "building_toid": target_building_toid,
-            "land_uprn_resolved": target_uprn in curtilages,
+            "land_toid": target_land_toid,
             "classification": target.get("CLASSIFICATION_CODE_DESCRIPTION"),
         },
         "neighbours": neighbours,
         "rejected_candidates": rejected,
-        "vetoed_candidates": vetoed,
         "aborted_multi_dwelling": aborted,
         "neighbour_count": len(neighbours),
     }
 
 
 # ---------------------------------------------------------------------------
-# DEBUG HELPER — inspect WHY a boundary is being vetoed, and see the merged
-# curtilage fragments for a given property before tuning thresholds.
+# DEBUG HELPER — inspect WHY a boundary is being vetoed, before tuning
+# MIN_THIRD_PARTY_AREA_SQM or PINCH_POINT_CHECK_DISTANCE_M.
 # ---------------------------------------------------------------------------
-def debug_clean_boundary(target_uprn, candidate_uprn, curtilages, nearby_land_feats,
-                          min_distance=PINCH_POINT_CHECK_DISTANCE_M):
-    target_poly = curtilages.get(target_uprn, {}).get("polygon")
-    cand_poly = curtilages.get(candidate_uprn, {}).get("polygon")
+def debug_clean_boundary_verbose(target_land_toid, candidate_toid, nearby_land_feats, top_n=5):
+    target_poly = None
+    cand_poly = None
+    for feat in nearby_land_feats:
+        if feat["properties"]["toid"] == target_land_toid:
+            target_poly = shape(feat["geometry"])
+        if feat["properties"]["toid"] == candidate_toid:
+            cand_poly = shape(feat["geometry"])
 
     if target_poly is None or cand_poly is None:
-        print("Could not find one or both curtilages in the merged map")
+        print("Could not find one or both polygons in nearby_land_feats")
         return
 
     shared = target_poly.boundary.intersection(cand_poly.boundary)
@@ -502,71 +427,26 @@ def debug_clean_boundary(target_uprn, candidate_uprn, curtilages, nearby_land_fe
         print("No real shared boundary between these two.")
         return
 
-    own_toids = set(curtilages[target_uprn]["component_toids"]) | set(curtilages[candidate_uprn]["component_toids"])
     midpoint = shared.interpolate(0.5, normalized=True)
     print(f"Shared boundary length: {shared.length:.2f}m")
-    print(f"Target curtilage component TOIDs: {curtilages[target_uprn]['component_toids']}")
-    print(f"Candidate curtilage component TOIDs: {curtilages[candidate_uprn]['component_toids']}")
+
+    distances = []
     for feat in nearby_land_feats:
         toid = feat["properties"]["toid"]
-        if toid in own_toids:
-            continue  # these are the two properties' own parcels, not a third party
+        if toid in (target_land_toid, candidate_toid):
+            continue
         poly = shape(feat["geometry"])
         d = midpoint.distance(poly)
-        if d < min_distance:
-            print(f"  BLOCKED by {toid} at distance {d:.3f}m — area: {poly.area:.1f} sq m")
-
-
-def debug_property(address_text, api_key):
-    """One-shot diagnostic: geocode, fetch land, build curtilage map, and
-    print the full touching-candidate table with reasons for every
-    accept/reject/veto decision. Use this instead of ad hoc snippets so
-    every run is guaranteed to use fresh, correctly-scoped coordinates."""
-    ctx = OSContext(api_key)
-    target = geocode_address(ctx, address_text)
-    if not target:
-        print("Target address not found")
-        return
-
-    target_x, target_y = target["X_COORDINATE"], target["Y_COORDINATE"]
-    nearby_land = get_nearby_polygons(ctx, "lnd-fts-land-1", target_x, target_y)
-    address_points = get_nearby_address_points(ctx, target_x, target_y)
-    curtilages, unassigned = build_curtilage_map(nearby_land, address_points)
-
-    target_uprn = target["UPRN"]
-    print(f"Target: {target['ADDRESS']} (UPRN {target_uprn})")
-    if target_uprn not in curtilages:
-        print("  WARNING: target UPRN not resolved via address-matched land fragments")
-        return
-    print(f"  Curtilage area: {curtilages[target_uprn]['polygon'].area:.1f} sqm, "
-          f"fragments: {curtilages[target_uprn]['component_toids']}")
-
-    target_poly = curtilages[target_uprn]["polygon"]
-    buffered = target_poly.buffer(BUFFER_M)
-
-    for uprn, c in curtilages.items():
-        if uprn == target_uprn:
-            continue
-        if not buffered.intersects(c["polygon"]):
-            continue
-        shared = shares_real_boundary(target_poly, c["polygon"])
-        if shared is None:
-            continue
-        clean, blocker = is_clean_two_party_boundary(
-            shared, curtilages[target_uprn]["component_toids"], c["component_toids"], nearby_land
-        )
-        ok, dist = sanity_check_distance(target_x, target_y, c["dpa"])
-        print(f"  {c['address']} | shared {shared.length:.2f}m | "
-              f"pinch_clean={clean}{'' if clean else f' (blocked by {blocker})'} | "
-              f"dist={dist:.1f}m plausible={ok}")
+        distances.append((d, toid, poly.area))
+    
+    distances.sort(key=lambda x: x[0])
+    print(f"Nearest {top_n} other parcels to this boundary's midpoint:")
+    for d, toid, area in distances[:top_n]:
+        print(f"  {toid}: {d:.3f}m away, area={area:.1f} sqm")
 
 
 if __name__ == "__main__":
     import json
-    address = "9 Buxton Close Surrey Epsom KT19 8BD"
-    API_KEY = "aJARAMAGjcqsJbfGyA9pXOAuYkwhyxHm"
-    result = find_neighbours(address, API_KEY, debug=True)
-    print(json.dumps(result['neighbours']))
-#
-#     # or, for the focused diagnostic used to chase the Burnhams Grove case:
-#     debug_property("9 Buxton Close, Epsom, KT19 8BD", API_KEY)
+    address = "9 Buxton Close Epsom KT19 8BD"
+    result = find_neighbours(address, debug=True)
+    print(json.dumps(result, indent=2))
