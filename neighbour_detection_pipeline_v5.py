@@ -65,8 +65,21 @@ WHAT'S NEW IN v7:
     whatever partial match info OS Places did return, so failed inputs are
     easy to triage instead of showing up as a blank row.
 
+WHAT'S NEW IN v8:
+  - Target and neighbour coordinates are now converted from the OS grid
+    (EPSG:27700 / British National Grid) to WGS84 lat/lon via `pyproj`,
+    the same approach as the reference snippet — reusing one cached
+    Transformer per CRS rather than rebuilding it on every address point.
+  - Alongside the incremental CSVs, the run now also writes two formatted
+    .xlsx workbooks (openpyxl) once the batch finishes: Title Case column
+    headers with a space between words, bold header row, frozen header,
+    and auto-sized columns. The CSVs remain the row-by-row audit trail
+    written during the run (so a crash mid-batch still leaves usable
+    output); the .xlsx files are the polished deliverable built from them
+    at the end.
+
 Requirements:
-    pip install requests shapely pandas python-dotenv
+    pip install requests shapely pandas python-dotenv pyproj openpyxl
 
 You will need an OS Data Hub API key on the Premium Plan (free tier /
 development mode is fine for testing) with these APIs added to the project:
@@ -77,10 +90,12 @@ development mode is fine for testing) with these APIs added to the project:
 import csv
 import logging
 import os
+import uuid
 from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
+from pyproj import Transformer
 from shapely.geometry import shape, Point
 
 load_dotenv(override=True)
@@ -133,21 +148,25 @@ UNMATCHED_CSV_PATH = os.path.join(OUTPUT_DIR, f"unmatched_addresses_{RUN_STAMP}.
 LOG_FILE_PATH = os.path.join(LOG_DIR, f"pipeline_{RUN_STAMP}.log")
 
 NEIGHBOURS_CSV_FIELDS = [
-    "target_uprn", "target_address", "target_building_toid", "target_land_toid",
-    "target_classification",
-    "neighbour_uprn", "neighbour_address", "neighbour_classification",
-    "neighbour_toid", "distance_m",
+    "Reference Id",
+    "Target Uprn", "Target Address", "Target Building Toid", "Target Land Toid",
+    "Target Classification", "Target Latitude", "Target Longitude",
+    "Neighbour Uprn", "Neighbour Address", "Neighbour Classification",
+    "Neighbour Toid", "Neighbour Latitude", "Neighbour Longitude", "Distance M",
 ]
 
 FULL_RESULTS_CSV_FIELDS = [
-    "target_uprn", "target_address", "target_building_toid", "target_land_toid",
-    "target_classification", "aborted_multi_dwelling", "neighbour_count",
-    "record_type",       # "neighbour" | "rejected" | "none_found" | "error"
-    "uprn", "address", "classification", "toid", "distance_m", "reason",
+    "Reference Id",
+    "Target Uprn", "Target Address", "Target Building Toid", "Target Land Toid",
+    "Target Classification", "Target Latitude", "Target Longitude",
+    "Aborted Multi Dwelling", "Neighbour Count",
+    "Record Type",       # "Neighbour" | "Rejected" | "None Found" | "Error"
+    "Uprn", "Address", "Classification", "Toid", "Latitude", "Longitude",
+    "Distance M", "Reason",
 ]
 
 UNMATCHED_CSV_FIELDS = [
-    "input_address", "raw_results_count", "best_match_address", "best_match_score",
+    "Reference Id", "Input Address", "Raw Results Count", "Best Match Address", "Best Match Score",
 ]
 
 # ---------------------------------------------------------------------------
@@ -224,6 +243,31 @@ def geocode_address(address_text, diagnostics=None):
 
 def _crs():
     return CRS_TEMPLATE.format(srs.split(":")[-1])
+
+
+# ---------------------------------------------------------------------------
+# COORDINATE CONVERSION — OS grid (e.g. EPSG:27700 / British National Grid)
+# to WGS84 lat/lon, same approach as the reference snippet. Transformers are
+# cached per CRS code since building one is comparatively expensive and the
+# CRS is the same for every point within a run.
+# ---------------------------------------------------------------------------
+_transformer_cache = {}
+
+
+def get_transformer(crs_code):
+    if crs_code not in _transformer_cache:
+        _transformer_cache[crs_code] = Transformer.from_crs(crs_code, "EPSG:4326")
+    return _transformer_cache[crs_code]
+
+
+def xy_to_latlon(x, y, crs_code=None):
+    """Convert an OS grid (X, Y) pair to (latitude, longitude) in WGS84.
+    Defaults to the CRS most recently reported by the OS Places API
+    (the module-level `srs`, e.g. 'EPSG:27700')."""
+    crs_code = crs_code or srs
+    transformer = get_transformer(crs_code)
+    lat, lon = transformer.transform(x, y)
+    return round(lat, 6), round(lon, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +492,14 @@ def is_valid_neighbour(dpa_record):
 # ---------------------------------------------------------------------------
 # MAIN PIPELINE
 # ---------------------------------------------------------------------------
-def find_neighbours(address_text, debug=False):
-    logger.info("Processing address: %s", address_text)
+def find_neighbours(address_text, debug=False, reference_id=None):
+    """`reference_id` ties every row this address produces (across the
+    neighbours / full-results / unmatched CSVs and xlsx exports) back to
+    this single lookup. Pass one in for batch runs (see main loop below,
+    which uses "<run_stamp>-<row_number>"); if omitted, a random one is
+    generated so standalone calls still get a usable id."""
+    reference_id = reference_id or f"REF-{uuid.uuid4().hex[:10]}"
+    logger.info("Processing address [%s]: %s", reference_id, address_text)
 
     diagnostics = {}
     target = geocode_address(address_text, diagnostics=diagnostics)
@@ -459,10 +509,12 @@ def find_neighbours(address_text, debug=False):
             "error": "target address not found",
             "input_address": address_text,
             "diagnostics": diagnostics,
+            "reference_id": reference_id,
         }
 
     target_x, target_y = target["X_COORDINATE"], target["Y_COORDINATE"]
     target_building_toid = target.get("TOPOGRAPHY_LAYER_TOID")
+    target_lat, target_lon = xy_to_latlon(target_x, target_y)
 
     # ---- Layer 1: buildings ----
     target_building_poly = None
@@ -552,11 +604,14 @@ def find_neighbours(address_text, debug=False):
 
             valid, reason = is_valid_neighbour(dpa)
             if valid:
+                n_lat, n_lon = xy_to_latlon(dpa["X_COORDINATE"], dpa["Y_COORDINATE"])
                 neighbours.append({
                     "uprn": uprn,
                     "address": dpa["ADDRESS"],
                     "classification": dpa.get("CLASSIFICATION_CODE_DESCRIPTION"),
                     "toid": t["toid"],
+                    "latitude": n_lat,
+                    "longitude": n_lon,
                     "distance_m": round(dist, 1),
                 })
             else:
@@ -575,12 +630,15 @@ def find_neighbours(address_text, debug=False):
     )
 
     return {
+        "reference_id": reference_id,
         "target": {
             "uprn": target["UPRN"],
             "address": target["ADDRESS"],
             "building_toid": target_building_toid,
             "land_toid": target_land_toid,
             "classification": target.get("CLASSIFICATION_CODE_DESCRIPTION"),
+            "latitude": target_lat,
+            "longitude": target_lon,
         },
         "neighbours": neighbours,
         "rejected_candidates": rejected,
@@ -655,16 +713,21 @@ def append_neighbours_csv(result, path=NEIGHBOURS_CSV_PATH):
         writer = csv.DictWriter(f, fieldnames=NEIGHBOURS_CSV_FIELDS)
         for n in result["neighbours"]:
             writer.writerow({
-                "target_uprn": target["uprn"],
-                "target_address": target["address"],
-                "target_building_toid": target["building_toid"],
-                "target_land_toid": target["land_toid"],
-                "target_classification": target["classification"],
-                "neighbour_uprn": n["uprn"],
-                "neighbour_address": n["address"],
-                "neighbour_classification": n["classification"],
-                "neighbour_toid": n["toid"],
-                "distance_m": n["distance_m"],
+                "Reference Id": result.get("reference_id", ""),
+                "Target Uprn": target["uprn"],
+                "Target Address": target["address"],
+                "Target Building Toid": target["building_toid"],
+                "Target Land Toid": target["land_toid"],
+                "Target Classification": target["classification"],
+                "Target Latitude": target["latitude"],
+                "Target Longitude": target["longitude"],
+                "Neighbour Uprn": n["uprn"],
+                "Neighbour Address": n["address"],
+                "Neighbour Classification": n["classification"],
+                "Neighbour Toid": n["toid"],
+                "Neighbour Latitude": n["latitude"],
+                "Neighbour Longitude": n["longitude"],
+                "Distance M": n["distance_m"],
             })
 
     logger.debug("Appended %d row(s) to %s", len(result["neighbours"]), path)
@@ -673,7 +736,7 @@ def append_neighbours_csv(result, path=NEIGHBOURS_CSV_PATH):
 def append_full_results_csv(result, input_address=None, path=FULL_RESULTS_CSV_PATH):
     """Append every candidate the pipeline looked at for this address:
     confirmed neighbours, rejected candidates, and (if neither) a single
-    'none_found' or 'error' row so the address is still represented in the
+    'None Found' or 'Error' row so the address is still represented in the
     audit trail even when nothing came out of it."""
     _init_csv(path, FULL_RESULTS_CSV_FIELDS)
 
@@ -681,25 +744,30 @@ def append_full_results_csv(result, input_address=None, path=FULL_RESULTS_CSV_PA
         with open(path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=FULL_RESULTS_CSV_FIELDS)
             writer.writerow({
-                "target_uprn": "", "target_address": input_address or "",
-                "target_building_toid": "", "target_land_toid": "",
-                "target_classification": "", "aborted_multi_dwelling": "",
-                "neighbour_count": "", "record_type": "error",
-                "uprn": "", "address": "", "classification": "", "toid": "",
-                "distance_m": "", "reason": result.get("error", ""),
+                "Reference Id": result.get("reference_id", ""),
+                "Target Uprn": "", "Target Address": input_address or "",
+                "Target Building Toid": "", "Target Land Toid": "",
+                "Target Classification": "", "Target Latitude": "", "Target Longitude": "",
+                "Aborted Multi Dwelling": "", "Neighbour Count": "", "Record Type": "Error",
+                "Uprn": "", "Address": "", "Classification": "", "Toid": "",
+                "Latitude": "", "Longitude": "", "Distance M": "",
+                "Reason": result.get("error", ""),
             })
         logger.debug("Appended error row to %s for %s", path, input_address)
         return
 
     target = result["target"]
     base_row = {
-        "target_uprn": target["uprn"],
-        "target_address": target["address"],
-        "target_building_toid": target["building_toid"],
-        "target_land_toid": target["land_toid"],
-        "target_classification": target["classification"],
-        "aborted_multi_dwelling": result["aborted_multi_dwelling"],
-        "neighbour_count": result["neighbour_count"],
+        "Reference Id": result.get("reference_id", ""),
+        "Target Uprn": target["uprn"],
+        "Target Address": target["address"],
+        "Target Building Toid": target["building_toid"],
+        "Target Land Toid": target["land_toid"],
+        "Target Classification": target["classification"],
+        "Target Latitude": target["latitude"],
+        "Target Longitude": target["longitude"],
+        "Aborted Multi Dwelling": result["aborted_multi_dwelling"],
+        "Neighbour Count": result["neighbour_count"],
     }
 
     rows = []
@@ -707,27 +775,30 @@ def append_full_results_csv(result, input_address=None, path=FULL_RESULTS_CSV_PA
     for n in result["neighbours"]:
         rows.append({
             **base_row,
-            "record_type": "neighbour",
-            "uprn": n["uprn"], "address": n["address"],
-            "classification": n["classification"], "toid": n["toid"],
-            "distance_m": n["distance_m"], "reason": "",
+            "Record Type": "Neighbour",
+            "Uprn": n["uprn"], "Address": n["address"],
+            "Classification": n["classification"], "Toid": n["toid"],
+            "Latitude": n["latitude"], "Longitude": n["longitude"],
+            "Distance M": n["distance_m"], "Reason": "",
         })
 
     for rej in result["rejected_candidates"]:
         rows.append({
             **base_row,
-            "record_type": "rejected",
-            "uprn": rej.get("uprn", ""), "address": rej.get("address", ""),
-            "classification": "", "toid": rej.get("toid", ""),
-            "distance_m": "", "reason": rej.get("reason", ""),
+            "Record Type": "Rejected",
+            "Uprn": rej.get("uprn", ""), "Address": rej.get("address", ""),
+            "Classification": "", "Toid": rej.get("toid", ""),
+            "Latitude": "", "Longitude": "",
+            "Distance M": "", "Reason": rej.get("reason", ""),
         })
 
     if not rows:
         rows.append({
             **base_row,
-            "record_type": "none_found",
-            "uprn": "", "address": "", "classification": "", "toid": "",
-            "distance_m": "", "reason": "no candidate polygons touched the target",
+            "Record Type": "None Found",
+            "Uprn": "", "Address": "", "Classification": "", "Toid": "",
+            "Latitude": "", "Longitude": "",
+            "Distance M": "", "Reason": "no candidate polygons touched the target",
         })
 
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -750,13 +821,58 @@ def append_unmatched_csv(result, path=UNMATCHED_CSV_PATH):
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=UNMATCHED_CSV_FIELDS)
         writer.writerow({
-            "input_address": result.get("input_address", ""),
-            "raw_results_count": diag.get("raw_results_count", ""),
-            "best_match_address": diag.get("best_match_address", ""),
-            "best_match_score": diag.get("best_match_score", ""),
+            "Reference Id": result.get("reference_id", ""),
+            "Input Address": result.get("input_address", ""),
+            "Raw Results Count": diag.get("raw_results_count", ""),
+            "Best Match Address": diag.get("best_match_address", ""),
+            "Best Match Score": diag.get("best_match_score", ""),
         })
 
     logger.debug("Appended unmatched-address row to %s for %s", path, result.get("input_address"))
+
+
+# ---------------------------------------------------------------------------
+# XLSX EXPORT — Title Case, bold header row. The CSVs above are the
+# incremental audit trail written during the run; this builds the polished
+# .xlsx deliverable from a finished CSV once the batch completes.
+# ---------------------------------------------------------------------------
+def write_formatted_xlsx(csv_path, xlsx_path, sheet_name="Sheet1"):
+    """Load a CSV (already using our Title Case headers) and write it out
+    as a formatted .xlsx: bold header row, frozen header, auto-sized
+    columns. No-ops if the CSV doesn't exist (e.g. no neighbours found)."""
+    import pandas as pd
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    if not os.path.exists(csv_path):
+        logger.info("Skipping xlsx export — %s does not exist", csv_path)
+        return None
+
+    df = pd.read_csv(csv_path)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+
+    ws.append(list(df.columns))
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+
+    for row in df.itertuples(index=False):
+        ws.append(list(row))
+
+    # Auto-size columns based on the longest value (header or data) in each.
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        longest = max(
+            [len(str(col_name))] + [len(str(v)) for v in df[col_name].astype(str)]
+        )
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(longest + 2, 60)
+
+    wb.save(xlsx_path)
+    logger.info("Wrote formatted xlsx: %s", xlsx_path)
+    return xlsx_path
 
 
 if __name__ == "__main__":
@@ -770,14 +886,18 @@ if __name__ == "__main__":
     data = pd.read_csv(INPUT_FILE_PATH)
     logger.info("Loaded %d address(es) from %s", len(data), INPUT_FILE_PATH)
 
+    # If the input file already carries its own reference/id column, use
+    # that (so output rows tie back to the client's own record); otherwise
+    # generate one per row: "<run_stamp>-<row_number>".
+
     processed, failed, unmatched = 0, 0, 0
 
     for index, row in data.iterrows():
         address = row["Address"]
+        reference_id = row["Reference"]
         logger.info(f"{index} is on working.....")
-
         try:
-            result = find_neighbours(address, debug=True)
+            result = find_neighbours(address, debug=True, reference_id=reference_id)
             append_full_results_csv(result, input_address=address)
             if "error" in result:
                 append_unmatched_csv(result)
@@ -787,8 +907,13 @@ if __name__ == "__main__":
             processed += 1
         except Exception:
             logger.exception("Unhandled error processing address: %s", address)
-            append_full_results_csv({"error": "unhandled exception"}, input_address=address)
-            append_unmatched_csv({"error": "unhandled exception", "input_address": address})
+            error_result = {
+                "error": "unhandled exception",
+                "input_address": address,
+                "reference_id": reference_id,
+            }
+            append_full_results_csv(error_result, input_address=address)
+            append_unmatched_csv(error_result)
             failed += 1
 
     logger.info(
@@ -798,3 +923,8 @@ if __name__ == "__main__":
     logger.info("Neighbours CSV written to: %s", NEIGHBOURS_CSV_PATH)
     logger.info("Full results CSV written to: %s", FULL_RESULTS_CSV_PATH)
     logger.info("Unmatched addresses CSV written to: %s", UNMATCHED_CSV_PATH)
+
+    neighbours_xlsx_path = os.path.join(OUTPUT_DIR, f"neighbours_{RUN_STAMP}.xlsx")
+    full_results_xlsx_path = os.path.join(OUTPUT_DIR, f"full_results_{RUN_STAMP}.xlsx")
+    write_formatted_xlsx(NEIGHBOURS_CSV_PATH, neighbours_xlsx_path, sheet_name="Neighbours")
+    write_formatted_xlsx(FULL_RESULTS_CSV_PATH, full_results_xlsx_path, sheet_name="Full Results")
