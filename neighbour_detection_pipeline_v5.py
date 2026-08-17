@@ -41,10 +41,15 @@ development mode is fine for testing) with these APIs added to the project:
     - OS NGD API - Features
 """
 
-import requests
+import requests,os
+from dotenv import load_dotenv
 from shapely.geometry import shape, Point
 
-OS_API_KEY = "aJARAMAGjcqsJbfGyA9pXOAuYkwhyxHm"
+load_dotenv(override=True) 
+OS_API_KEY = os.getenv('API_KEY')
+
+if not OS_API_KEY:
+    raise ValueError("API_KEY not set in environment variables")
 
 PLACES_BASE = "https://api.os.uk/search/places/v1"
 NGD_BASE = "https://api.os.uk/features/ngd/ofa/v1/collections"
@@ -73,7 +78,7 @@ EXCLUDED_RESIDENTIAL_SUBTYPES = {
 
 srs = "EPSG:27700"  # set dynamically from the geocode response
 
-
+file_path = "Output/res_df3.csv"
 # ---------------------------------------------------------------------------
 # STEP 1 — Geocode the target address
 # ---------------------------------------------------------------------------
@@ -87,7 +92,6 @@ def geocode_address(address_text):
     srs = data.get("header", {}).get("output_srs", srs)
     results = data.get("results", [])
     
-
     if not results:
         return None
     return results[0]["DPA"]
@@ -125,7 +129,7 @@ def get_nearby_polygons(collection, x, y, pad=SEARCH_PAD_M):
         "bbox": bbox,
         "bbox-crs": _crs(),
         "crs": _crs(),
-        "limit": 10,
+        "limit": 100,
     }
     r = requests.get(url, params=params)
     if r.status_code != 200:
@@ -447,6 +451,11 @@ def debug_clean_boundary_verbose(target_land_toid, candidate_toid, nearby_land_f
 
 if __name__ == "__main__":
     import json
-    address = "9 Buxton Close Epsom KT19 8BD"
+    # import pandas as pd
+    address = "81 Bracken Path Epsom Surrey KT18 7SZ"
+    # data = pd.read_csv(file_path)
+
+    # for index,row in data
     result = find_neighbours(address, debug=True)
     print(json.dumps(result, indent=2))
+    
