@@ -12,17 +12,19 @@ from dotenv import dotenv_values
 import time
 
 class LetterProcessor:
-    def __init__(self, excel_file_path, template_path, api_key):
+    def __init__(self, excel_file_path, template_path1, template_path2, api_key):
         """
         Initialize the letter processor.
         
         Args:
             excel_file_path: Path to the Excel file
-            template_path: Path to the Word template
+            template_path1: Path to the Letter One Word template
+            template_path2: Path to the Letter Two Word template
             api_key: Stannp API key
         """
         self.excel_file_path = excel_file_path
-        self.template_path = template_path
+        self.template_path1 = template_path1  # Letter One template
+        self.template_path2 = template_path2  # Letter Two template
         self.api_key = api_key
         self.df = None
         self.temp_dir = "temp_docx"
@@ -45,20 +47,31 @@ class LetterProcessor:
             sanitized = sanitized[:200]
         return sanitized
     
-    def generate_filename(self, reference, neighbour_type):
-        """Generate filename based on reference and neighbour type."""
+    def generate_filename(self, reference, letter_type, neighbour_type=None):
+        """
+        Generate filename based on reference, letter type and neighbour type.
+        
+        Args:
+            reference: Planning reference
+            letter_type: 'One' or 'Two'
+            neighbour_type: 'One', 'Two' or None (for applicant)
+        """
         safe_reference = self.sanitize_filename(reference)
         safe_reference = safe_reference.replace('/', '_')
-        return f"{safe_reference}_{neighbour_type}"
+        
+        if letter_type == 'One' and neighbour_type:
+            return f"{safe_reference}_Letter{letter_type}_Neighbour{neighbour_type}"
+        elif letter_type == 'Two':
+            return f"{safe_reference}_Letter{letter_type}_Applicant"
+        else:
+            return f"{safe_reference}_Letter{letter_type}"
     
     def format_address(self, address):
         """
         Format address with proper line breaks.
         Example: "85 OPHIR ROAD, PORTSMOUTH, PO2 9ER"
         becomes:
-        "85 OPHIR ROAD,
-        PORTSMOUTH,
-        PO2 9ER"
+        "85 OPHIR ROAD,\nPORTSMOUTH,\nPO2 9ER"
         """
         if not address:
             return address
@@ -69,12 +82,14 @@ class LetterProcessor:
         # Join with newline
         return ',\n'.join(parts)
     
-    def generate_letter(self, reference, property_address, neighbour_address, docx_path):
-        """Generate a letter from the template."""
+    def generate_letter_one(self, reference, property_address, neighbour_address, docx_path):
+        """
+        Generate Letter One (Neighbour Letter) from the template.
+        """
         try:
             os.makedirs(os.path.dirname(docx_path), exist_ok=True)
             
-            doc = DocxTemplate(self.template_path)
+            doc = DocxTemplate(self.template_path1)
             
             # Format addresses with proper line breaks
             property_address_formatted = self.format_address(property_address)
@@ -87,11 +102,37 @@ class LetterProcessor:
             })
             
             doc.save(docx_path)
-            print(f"✅ Generated DOCX: {os.path.basename(docx_path)}")
+            print(f"✅ Generated Letter One DOCX: {os.path.basename(docx_path)}")
             return docx_path
             
         except Exception as e:
-            print(f"❌ Error generating letter: {e}")
+            print(f"❌ Error generating Letter One: {e}")
+            return None
+    
+    def generate_letter_two(self, reference, property_address, applicant_first_name, docx_path):
+        """
+        Generate Letter Two (Applicant Letter) from the template.
+        """
+        try:
+            os.makedirs(os.path.dirname(docx_path), exist_ok=True)
+            
+            doc = DocxTemplate(self.template_path2)
+            
+            # Format address with proper line breaks (SAME AS LETTER ONE)
+            property_address_formatted = self.format_address(property_address)
+            
+            doc.render({
+                "Applicant_First_Name": applicant_first_name,
+                "Reference": reference,
+                "address1": property_address_formatted,  # Property address with line breaks (NOW FORMATTED)
+            })
+            
+            doc.save(docx_path)
+            print(f"✅ Generated Letter Two DOCX: {os.path.basename(docx_path)}")
+            return docx_path
+            
+        except Exception as e:
+            print(f"❌ Error generating Letter Two: {e}")
             return None
     
     def check_conversion_methods(self):
@@ -300,8 +341,8 @@ class LetterProcessor:
 
             if response.status_code == 200:
                 response_data = response.json()
-                pdf_url = response_data.get('data').get('pdf', '').replace('\\', '')
-                print(f"✅ Successfully sent to Stannp , URL : ",pdf_url)
+                pdf_url = response_data.get('data', {}).get('pdf', '').replace('\\', '')
+                print(f"✅ Successfully sent to Stannp, URL: {pdf_url}")
                 return pdf_url
             else:
                 print(f"❌ Error sending to Stannp: {response.status_code}")
@@ -312,16 +353,19 @@ class LetterProcessor:
             print(f"❌ Error in Stannp API call: {e}")
             return None
     
-    def process_neighbour_address(self, reference, property_address, neighbour_address, neighbour_type, output_dir, test_mode=True):
-        """Process a single neighbour address."""
+    def process_neighbour_address(self, reference, property_address, neighbour_address, 
+                                   neighbour_type, output_dir, test_mode=True):
+        """
+        Process a single neighbour address (Letter One).
+        """
         try:
-            base_filename = self.generate_filename(reference, neighbour_type)
+            base_filename = self.generate_filename(reference, 'One', neighbour_type)
             
             temp_docx_path = os.path.join(self.temp_dir, f"{base_filename}.docx")
             final_pdf_path = os.path.join(output_dir, f"{base_filename}.pdf")
             
-            # Generate DOCX
-            docx_file = self.generate_letter(
+            # Generate Letter One DOCX
+            docx_file = self.generate_letter_one(
                 reference, 
                 property_address,
                 neighbour_address,
@@ -353,41 +397,152 @@ class LetterProcessor:
             print(f"❌ Error processing neighbour {neighbour_type}: {e}")
             return None
     
-    def process_row(self, row, output_dir, test_mode=True):
-        """Process a single row from the DataFrame."""
+    def process_applicant_letter(self, reference, property_address, applicant_name, 
+                                   output_dir, test_mode=True):
+        """
+        Process applicant letter (Letter Two).
+        """
+        try:
+            # Extract first name from applicant name
+            first_name = self.extract_first_name(applicant_name)
+            
+            base_filename = self.generate_filename(reference, 'Two')
+            
+            temp_docx_path = os.path.join(self.temp_dir, f"{base_filename}.docx")
+            final_pdf_path = os.path.join(output_dir, f"{base_filename}.pdf")
+            
+            # Generate Letter Two DOCX
+            docx_file = self.generate_letter_two(
+                reference,
+                property_address,
+                first_name,
+                temp_docx_path
+            )
+            
+            if not docx_file:
+                return None
+            
+            # Convert to PDF
+            pdf_path = self.convert_docx_to_pdf(docx_file, final_pdf_path)
+            
+            # Clean up temporary DOCX
+            try:
+                if os.path.exists(docx_file):
+                    os.remove(docx_file)
+            except:
+                pass
+            
+            if not pdf_path:
+                return None
+            
+            # Send to Stannp
+            pdf_url = self.send_to_stannp(pdf_path, reference, test_mode)
+            
+            return pdf_url
+            
+        except Exception as e:
+            print(f"❌ Error processing applicant letter: {e}")
+            return None
+    
+    def extract_first_name(self, applicant_name):
+        """
+        Extract first name from applicant name.
+        Handles various name formats:
+        - "Mr P Steele" -> "Steele" (Household)
+        - "Mr. Chris Banks & Mrs. Claire Tyler" -> "Mr. Chris Banks & Mrs. Claire Tyler" (Joint)
+        - "Smith" -> "Smith Household"
+        - "R Smith" -> "Smith Household"
+        - "Mr Chris Banks" -> "Chris" (Individual)
+        """
+        if pd.isna(applicant_name) or str(applicant_name).strip() == '':
+            return 'Applicant'
+        
+        name_str = str(applicant_name).strip()
+        name_parts = name_str.split()
+        
+        # Joint applicants (contains & or AND)
+        if '&' in name_str or ' AND ' in name_str.upper():
+            return name_str
+        
+        # Surname only
+        if len(name_parts) == 1:
+            return f"{name_str} Household"
+        
+        # Check if first part is a title or initial
+        titles = ['mr', 'mrs', 'ms', 'dr', 'prof', 'rev', 'sir', 'lord', 'lady', 'miss']
+        first_part = name_parts[0].lower().replace('.', '')
+        
+        # If first part is a title or initial, use surname + Household
+        if first_part in titles or len(name_parts[0]) <= 2:
+            surname = name_parts[-1].strip('.,')
+            return f"{surname} Household"
+        
+        # Normal case - use first name
+        return name_parts[0].strip('.,')
+    
+    def process_row(self, row, output_dir, test_mode=True, process_letter_one=True, process_letter_two=True):
+        """
+        Process a single row from the DataFrame.
+        
+        Args:
+            row: DataFrame row
+            output_dir: Output directory
+            test_mode: Whether to run in test mode
+            process_letter_one: Whether to process Letter One (neighbour letters)
+            process_letter_two: Whether to process Letter Two (applicant letter)
+        """
         reference = row['Reference']
         property_address = row['Address']
+        applicant_name = row.get('Letter Name', '')
         
         print(f"\n{'='*60}")
         print(f"📝 Processing {reference}")
         print(f"📍 Property Address: {property_address}")
+        print(f"👤 Applicant: {applicant_name}")
         print(f"{'='*60}")
         
         pdf_urls = {}
         
-        # Process Neighbour 1
-        neighbour1_address = row.get('Neighbour 1 Address')
-        if pd.notna(neighbour1_address) and neighbour1_address:
-            print(f"👤 Processing Neighbour 1: {neighbour1_address}")
-            pdf_url = self.process_neighbour_address(
-                reference, property_address, neighbour1_address, 'One', output_dir, test_mode
-            )
-            if pdf_url:
-                pdf_urls['Neighbour 1'] = pdf_url
+        # Process Neighbour 1 (Letter One) - SKIP if not processing Letter One
+        if process_letter_one:
+            neighbour1_address = row.get('Neighbour 1 Address')
+            if pd.notna(neighbour1_address) and neighbour1_address:
+                print(f"👤 Processing Neighbour 1: {neighbour1_address}")
+                pdf_url = self.process_neighbour_address(
+                    reference, property_address, neighbour1_address, 'One', output_dir, test_mode
+                )
+                if pdf_url:
+                    pdf_urls['Letter One Neighbour 1'] = pdf_url
+            else:
+                print(f"⚠️ No Neighbour 1 address")
+            
+            # Process Neighbour 2 (Letter One)
+            neighbour2_address = row.get('Neighbour 2 Address')
+            if pd.notna(neighbour2_address) and neighbour2_address:
+                print(f"👤 Processing Neighbour 2: {neighbour2_address}")
+                pdf_url = self.process_neighbour_address(
+                    reference, property_address, neighbour2_address, 'Two', output_dir, test_mode
+                )
+                if pdf_url:
+                    pdf_urls['Letter One Neighbour 2'] = pdf_url
+            else:
+                print(f"⚠️ No Neighbour 2 address")
         else:
-            print(f"⚠️ No Neighbour 1 address")
+            print(f"⏭️ Skipping Letter One (neighbour letters)")
         
-        # Process Neighbour 2
-        neighbour2_address = row.get('Neighbour 2 Address')
-        if pd.notna(neighbour2_address) and neighbour2_address:
-            print(f"👤 Processing Neighbour 2: {neighbour2_address}")
-            pdf_url = self.process_neighbour_address(
-                reference, property_address, neighbour2_address, 'Two', output_dir, test_mode
-            )
-            if pdf_url:
-                pdf_urls['Neighbour 2'] = pdf_url
+        # Process Applicant Letter (Letter Two)
+        if process_letter_two:
+            if pd.notna(applicant_name) and applicant_name:
+                print(f"👤 Processing Applicant Letter: {applicant_name}")
+                pdf_url = self.process_applicant_letter(
+                    reference, property_address, applicant_name, output_dir, test_mode
+                )
+                if pdf_url:
+                    pdf_urls['Letter Two Applicant'] = pdf_url
+            else:
+                print(f"⚠️ No Applicant name")
         else:
-            print(f"⚠️ No Neighbour 2 address")
+            print(f"⏭️ Skipping Letter Two (applicant letter)")
         
         return pdf_urls
     
@@ -400,8 +555,16 @@ class LetterProcessor:
         except Exception as e:
             print(f"⚠️ Could not clean up temp directory: {e}")
     
-    def process_all_rows(self, output_dir="output", test_mode=True):
-        """Process all rows in the DataFrame."""
+    def process_all_rows(self, output_dir="output", test_mode=True, process_letter_one=True, process_letter_two=True):
+        """
+        Process all rows in the DataFrame.
+        
+        Args:
+            output_dir: Output directory for PDFs
+            test_mode: Whether to run in test mode
+            process_letter_one: Whether to process Letter One (neighbour letters)
+            process_letter_two: Whether to process Letter Two (applicant letter)
+        """
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
         
@@ -412,38 +575,53 @@ class LetterProcessor:
             print("❌ No data found in Excel file.")
             return self.df
         
+        print(f"\n📋 Processing settings:")
+        print(f"   Letter One (Neighbour): {'✅' if process_letter_one else '❌'}")
+        print(f"   Letter Two (Applicant): {'✅' if process_letter_two else '❌'}")
+        
         # Check conversion methods before processing
         self.check_conversion_methods()
         
-        # Initialize columns
-        if 'Letter HTML Neighbour 1' not in self.df.columns:
-            self.df['Letter HTML Neighbour 1'] = None
-        if 'Letter HTML Neighbour 2' not in self.df.columns:
-            self.df['Letter HTML Neighbour 2'] = None
+        # Initialize columns for Letter One if needed
+        if process_letter_one:
+            if 'Letter One HTML Neighbour 1' not in self.df.columns:
+                self.df['Letter One HTML Neighbour 1'] = None
+            if 'Letter One HTML Neighbour 2' not in self.df.columns:
+                self.df['Letter One HTML Neighbour 2'] = None
+        
+        # Initialize columns for Letter Two if needed
+        if process_letter_two:
+            if 'Letter Two HTML' not in self.df.columns:
+                self.df['Letter Two HTML'] = None
         
         # Process each row
         total_rows = len(self.df)
         for idx, row in self.df.iterrows():
             print(f"\n📊 Processing row {idx + 1}/{total_rows}")
-            pdf_urls = self.process_row(row, output_dir, test_mode)
+            pdf_urls = self.process_row(row, output_dir, test_mode, process_letter_one, process_letter_two)
             
-            if 'Neighbour 1' in pdf_urls:
-                self.df.at[idx, 'Letter HTML Neighbour 1'] = pdf_urls['Neighbour 1']
+            # Update DataFrame with URLs
+            if 'Letter One Neighbour 1' in pdf_urls:
+                self.df.at[idx, 'Letter One HTML Neighbour 1'] = pdf_urls['Letter One Neighbour 1']
             
-            if 'Neighbour 2' in pdf_urls:
-                self.df.at[idx, 'Letter HTML Neighbour 2'] = pdf_urls['Neighbour 2']
+            if 'Letter One Neighbour 2' in pdf_urls:
+                self.df.at[idx, 'Letter One HTML Neighbour 2'] = pdf_urls['Letter One Neighbour 2']
+            
+            if 'Letter Two Applicant' in pdf_urls:
+                self.df.at[idx, 'Letter Two HTML'] = pdf_urls['Letter Two Applicant']
 
+            # Save temporary progress
             temp_excel = self.excel_file_path.replace('.xlsx', '_temp.xlsx')
             self.df.to_excel(temp_excel, index=False)
-            print(f"\n✅ Updated Excel file saved to: {temp_excel}")
+            print(f"\n💾 Updated Excel file saved to: {temp_excel}")
         
         # Clean up
         self.cleanup_temp_files()
         
-        # Save updated Excel
+        # Save final updated Excel
         output_excel = self.excel_file_path.replace('.xlsx', '_updated.xlsx')
         self.df.to_excel(output_excel, index=False)
-        print(f"\n✅ Updated Excel file saved to: {output_excel}")
+        print(f"\n✅ Final updated Excel file saved to: {output_excel}")
         
         return self.df
 
@@ -457,12 +635,13 @@ def main():
     
     # Configuration
     EXCEL_FILE = r"c:\Users\Rohit\Downloads\U095 Extracted Data.xlsx"
-    TEMPLATE_PATH = r"c:\Users\Rohit\Downloads\letter_one.docx"
-    
+    TEMPLATE_PATH1 = r"c:\Users\Rohit\Downloads\letter_one.docx"
+    TEMPLATE_PATH2 = r"c:\Users\Rohit\Documents\letter two final draft 09.08.2026.docx"
     
     if not API_KEY:
         print("⚠️ STANNP_KEY not found in .env file")
         print("Using fallback API key for testing")
+        API_KEY = "YOUR_FALLBACK_API_KEY"
     
     OUTPUT_DIR = "output_pdfs"
     TEST_MODE = True
@@ -470,10 +649,20 @@ def main():
     print("\n" + "="*60)
     print("📧 Letter Processing System")
     print("="*60)
+    print(f"📂 Excel File: {EXCEL_FILE}")
+    print(f"📄 Template 1 (Letter One): {TEMPLATE_PATH1}")
+    print(f"📄 Template 2 (Letter Two): {TEMPLATE_PATH2}")
+    print(f"📁 Output Directory: {OUTPUT_DIR}")
+    print(f"🧪 Test Mode: {TEST_MODE}")
+    print("="*60)
     
     # Check if files exist
-    if not os.path.exists(TEMPLATE_PATH):
-        print(f"❌ Template file not found: {TEMPLATE_PATH}")
+    if not os.path.exists(TEMPLATE_PATH1):
+        print(f"❌ Template 1 not found: {TEMPLATE_PATH1}")
+        return
+    
+    if not os.path.exists(TEMPLATE_PATH2):
+        print(f"❌ Template 2 not found: {TEMPLATE_PATH2}")
         return
     
     if not os.path.exists(EXCEL_FILE):
@@ -481,16 +670,40 @@ def main():
         return
     
     # Initialize and process
-    processor = LetterProcessor(EXCEL_FILE, TEMPLATE_PATH, API_KEY)
+    processor = LetterProcessor(EXCEL_FILE, TEMPLATE_PATH1, TEMPLATE_PATH2, API_KEY)
     
     try:
-        updated_df = processor.process_all_rows(OUTPUT_DIR, TEST_MODE)
-        print("\n✅ Processing complete!")
+        # MODIFIED: Set process_letter_one=False, process_letter_two=True
+        # This will ONLY process Letter Two (applicant letters)
+        updated_df = processor.process_all_rows(
+            OUTPUT_DIR, 
+            TEST_MODE,
+            process_letter_one=True,
+            process_letter_two=True 
+        )
+        
+        print("\n" + "="*60)
+        print("✅ Processing complete!")
+        print("="*60)
         
         # Show results
         print("\n📋 Sample results:")
-        sample_cols = ['Reference', 'Total Neighbours', 'Letter HTML Neighbour 1', 'Letter HTML Neighbour 2']
-        print(updated_df[sample_cols].head(5).to_string())
+        sample_cols = ['Reference', 'Total Neighbours', 
+                       'Letter One HTML Neighbour 1', 'Letter One HTML Neighbour 2',
+                       'Letter Two HTML']
+        existing_cols = [col for col in sample_cols if col in updated_df.columns]
+        print(updated_df[existing_cols].head(5).to_string())
+        
+        # Print statistics
+        print("\n📊 Statistics:")
+        total_rows = len(updated_df)
+        letter_one_count = updated_df['Letter One HTML Neighbour 1'].notna().sum() + \
+                           updated_df['Letter One HTML Neighbour 2'].notna().sum()
+        letter_two_count = updated_df['Letter Two HTML'].notna().sum()
+        
+        print(f"   Total rows processed: {total_rows}")
+        print(f"   Letter One sent: {letter_one_count}")
+        print(f"   Letter Two sent: {letter_two_count}")
         
     except Exception as e:
         print(f"❌ Error: {e}")
