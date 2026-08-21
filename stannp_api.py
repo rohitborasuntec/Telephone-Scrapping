@@ -443,41 +443,125 @@ class LetterProcessor:
             print(f"❌ Error processing applicant letter: {e}")
             return None
     
-    def extract_first_name(self, applicant_name):
-        """
-        Extract first name from applicant name.
-        Handles various name formats:
-        - "Mr P Steele" -> "Steele" (Household)
-        - "Mr. Chris Banks & Mrs. Claire Tyler" -> "Mr. Chris Banks & Mrs. Claire Tyler" (Joint)
-        - "Smith" -> "Smith Household"
-        - "R Smith" -> "Smith Household"
-        - "Mr Chris Banks" -> "Chris" (Individual)
-        """
-        if pd.isna(applicant_name) or str(applicant_name).strip() == '':
-            return 'Applicant'
+def extract_first_name(self, applicant_name):
+    """
+    Extract first name from applicant name.
+    Handles various name formats:
+    - "Mr P Steele" -> "Steele Household"
+    - "Mr. Chris Banks & Mrs. Claire Tyler" -> "Mr. Chris Banks & Mrs. Claire Tyler" (Joint)
+    - "Smith" -> "Smith Household"
+    - "R Smith" -> "Smith Household"
+    - "Mr Chris Banks" -> "Chris" (Individual)
+    - "Mr And Mrs Pinkham" -> "Mr And Mrs Pinkham" (Couple with only surname)
+    - "Mr & Mrs Hillcoat" -> "Mr & Mrs Hillcoat" (Couple with only surname)
+    - "Mr and Mrs Collins" -> "Mr and Mrs Collins" (Couple with only surname)
+    """
+    if pd.isna(applicant_name) or str(applicant_name).strip() == '':
+        return 'Applicant'
+    
+    name_str = str(applicant_name).strip()
+    
+    # List of business/organisation names to keep as-is
+    businesses = [
+        "Nationwide Building Society",
+        "The Shere Surgery and Dispensary",
+        "Allianz",
+        "Owner"
+    ]
+    
+    if name_str in businesses:
+        return name_str
+    
+    # Check for "Mr & Mrs" or "Mr and Mrs" patterns (case insensitive)
+    # This must be checked BEFORE the general '&' or 'and' detection
+    mr_mrs_pattern = r'(?i)^(mr\s*&\s*mrs|mr\s+and\s+mrs)'
+    mr_mrs_match = re.match(mr_mrs_pattern, name_str)
+    
+    if mr_mrs_match:
+        # Extract the rest after Mr & Mrs
+        rest = name_str[mr_mrs_match.end():].strip()
         
-        name_str = str(applicant_name).strip()
-        name_parts = name_str.split()
+        # Check if rest contains first names (e.g., "Simon & Mary O'Brien" or "Joe and Gillian Allen")
+        # If there are 2 or more words after, or contains '&' or 'and', it has first names
+        rest_parts = rest.split()
         
-        # Joint applicants (contains & or AND)
-        if '&' in name_str or ' AND ' in name_str.upper():
+        # Check for patterns like "Simon & Mary O'Brien" or "Joe and Gillian Allen"
+        if len(rest_parts) >= 3:  # e.g., "Simon & Mary O'Brien" has 3+ words
+            return name_str  # Keep full as-is
+        elif '&' in rest or ' and ' in rest.lower():
+            return name_str  # Keep full as-is
+        elif len(rest_parts) >= 2 and rest_parts[0][0].isupper() and rest_parts[1][0].isupper():
+            # Two capitalized words = first names (e.g., "Phil and Pam" or "Simon Mary")
+            # But check if it's actually a first and last name
+            # If it's only 2 words and both are capitalized, it could be "Joe Allen" (first + last)
+            # We'll keep it as-is to be safe
             return name_str
-        
-        # Surname only
+        else:
+            # Only surname - keep as "Mr & Mrs [Surname]" or "Mr and Mrs [Surname]"
+            # Normalize the "and" to "&" for consistency if needed
+            return name_str
+    
+    # Check for joint applicants with '&' or 'and' (but not Mr & Mrs pattern)
+    if '&' in name_str or ' AND ' in name_str.upper():
+        # Check if it has full names (e.g., "Charles and Amanda Yaxley")
+        # Keep full as-is
+        return name_str
+    
+    # Check for titles (Mr, Mrs, Miss, Ms, Dr, Rev, etc.)
+    titles = ['mr', 'mrs', 'ms', 'dr', 'prof', 'rev', 'sir', 'lord', 'lady', 'miss', 'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'rev.']
+    name_parts = name_str.split()
+    
+    # Check if first part is a title
+    first_part_lower = name_parts[0].lower().replace('.', '')
+    
+    if first_part_lower in titles:
+        # Has title - check the rest
         if len(name_parts) == 1:
-            return f"{name_str} Household"
-        
-        # Check if first part is a title or initial
-        titles = ['mr', 'mrs', 'ms', 'dr', 'prof', 'rev', 'sir', 'lord', 'lady', 'miss']
-        first_part = name_parts[0].lower().replace('.', '')
-        
-        # If first part is a title or initial, use surname + Household
-        if first_part in titles or len(name_parts[0]) <= 2:
-            surname = name_parts[-1].strip('.,')
-            return f"{surname} Household"
-        
-        # Normal case - use first name
-        return name_parts[0].strip('.,')
+            # Just title - return as-is
+            return name_str
+        else:
+            rest = ' '.join(name_parts[1:])
+            rest_parts = rest.split()
+            
+            if len(rest_parts) == 0:
+                return name_str
+            elif len(rest_parts) == 1:
+                # Only surname (e.g., "Mr Barfoot")
+                return f"{rest_parts[0]} Household"
+            else:
+                # Check if first part of rest is an initial (e.g., "P Steele")
+                first_rest = rest_parts[0]
+                if len(first_rest) <= 2 and (first_rest.isupper() or first_rest.endswith('.')):
+                    # It's an initial - surname takes precedence
+                    surname = rest_parts[-1].strip('.,')
+                    return f"{surname} Household"
+                else:
+                    # Full first name - use first name only (e.g., "Mr Chris Banks" -> "Chris")
+                    return rest_parts[0].strip('.,')
+    
+    # No title - handle other cases
+    if len(name_parts) == 1:
+        # Single name - it's a surname
+        return f"{name_str} Household"
+    elif len(name_parts) == 2:
+        # Two names - check if first is an initial
+        first_part = name_parts[0]
+        if len(first_part) <= 2 and (first_part.isupper() or first_part.endswith('.')):
+            # Initial + Surname (e.g., "R Smith")
+            return f"{name_parts[1]} Household"
+        else:
+            # First name + Surname (e.g., "Rebecca Clewley")
+            return name_parts[0].strip('.,')
+    else:
+        # Three or more names - likely has first and last name
+        # Check if first part is an initial
+        first_part = name_parts[0]
+        if len(first_part) <= 2 and (first_part.isupper() or first_part.endswith('.')):
+            # Initial + rest - surname takes precedence
+            return f"{name_parts[-1]} Household"
+        else:
+            # Use the first part as first name
+            return name_parts[0].strip('.,')
     
     def process_row(self, row, output_dir, test_mode=True, process_letter_one=True, process_letter_two=True):
         """
