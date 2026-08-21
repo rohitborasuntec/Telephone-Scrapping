@@ -8,7 +8,7 @@ import os
 import csv
 import traceback
 import json
-from pathlib import Path
+from pathlib import Path    
 from datetime import datetime
 from typing import Optional, Dict, List
 import pandas as pd
@@ -16,6 +16,7 @@ import fitz
 import subprocess
 import re
 import platform
+from selenium.webdriver.common.keys import Keys
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select

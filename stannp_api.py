@@ -94,10 +94,9 @@ class LetterProcessor:
             # Format addresses with proper line breaks
             property_address_formatted = self.format_address(property_address)
             neighbour_address_formatted = self.format_address(neighbour_address)
-            
             doc.render({
                 "Reference": reference,
-                "Address": property_address_formatted,  # Property address with line breaks
+                "Address": property_address,  # Property address with line breaks
                 "address1": neighbour_address_formatted,  # Neighbour address with line breaks
             })
             
@@ -122,7 +121,7 @@ class LetterProcessor:
             property_address_formatted = self.format_address(property_address)
             
             doc.render({
-                "Applicant_First_Name": applicant_first_name,
+                "Applicant_First_Name": applicant_first_name + ",",
                 "Reference": reference,
                 "address1": property_address_formatted,  # Property address with line breaks (NOW FORMATTED)
             })
@@ -595,8 +594,11 @@ class LetterProcessor:
                 self.df['Letter Two HTML'] = None
         
         # Process each row
+        list_of_index = [68,23,97,114,163,145,194,199,221,252,39]
         total_rows = len(self.df)
         for idx, row in self.df.iterrows():
+            if idx not in list_of_index:
+                continue
             print(f"\n📊 Processing row {idx + 1}/{total_rows}")
             pdf_urls = self.process_row(row, output_dir, test_mode, process_letter_one, process_letter_two)
             
@@ -634,7 +636,7 @@ def main():
         API_KEY = None
     
     # Configuration
-    EXCEL_FILE = r"c:\Users\Rohit\Downloads\U095 Extracted Data.xlsx"
+    EXCEL_FILE = r"c:\Users\Rohit\Downloads\Data (1).xlsx"
     TEMPLATE_PATH1 = r"c:\Users\Rohit\Downloads\letter_one.docx"
     TEMPLATE_PATH2 = r"c:\Users\Rohit\Documents\letter two final draft 09.08.2026.docx"
     
